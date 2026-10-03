@@ -1,0 +1,4 @@
+hello.dll
+*.obj
+*.exp
+*.lib
