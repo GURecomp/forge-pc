@@ -102,7 +102,7 @@ Forge PC is MIT licensed (`LICENSE`). It builds on:
 - **[MHGU Forge](https://github.com/Fexty12573/forge)** by **Fexty**, with contributions by
   **jeffi2287**: the original Switch mod loader whose design, plugin API, menu and style this
   is a port of, done with the author's permission. MIT; its notice (Copyright (c) 2020 The
-  Skyline Project, Copyright (c) 2026 Jeffi) is reproduced in `LICENSE`.
+  Skyline Project, Copyright (c) 2026 Jeffi) is reproduced in `LICENSE-MHGU-Forge.txt`.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut: the menu UI, compiled into
   `forge.dll` and `hudfix.dll`. MIT, `third_party/imgui/LICENSE.txt`.
 - **Roboto** by Christian Robertson / Google (`data/Roboto-Medium.ttf`), the menu font as

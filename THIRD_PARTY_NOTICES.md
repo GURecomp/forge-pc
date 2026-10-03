@@ -8,8 +8,8 @@ the following third-party work.
 - What: the design, plugin API, menu and style this project ports to the PC build.
 - Author: Fexty (https://github.com/Fexty12573/forge), with contributions by jeffi2287.
   Ported with the author's permission.
-- License: MIT, Copyright (c) 2020 The Skyline Project, Copyright (c) 2026 Jeffi. The full
-  text is in `LICENSE` (second part).
+- License: MIT, Copyright (c) 2020 The Skyline Project, Copyright (c) 2026 Jeffi. Full text:
+  `LICENSE-MHGU-Forge.txt` (shipped in `licenses/`).
 
 ## Dear ImGui
 

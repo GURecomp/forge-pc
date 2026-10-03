@@ -29,6 +29,7 @@ if not exist "%OUT%\Forge\forge.ini" copy /y data\forge.ini "%OUT%\Forge\" >nul
 rem licenses travel with the binaries (MIT / Apache 2.0 notices)
 if not exist "%OUT%\Forge\licenses" mkdir "%OUT%\Forge\licenses"
 copy /y LICENSE "%OUT%\Forge\licenses\LICENSE.txt" >nul
+copy /y LICENSE-MHGU-Forge.txt "%OUT%\Forge\licenses\" >nul
 copy /y THIRD_PARTY_NOTICES.md "%OUT%\Forge\licenses\" >nul
 copy /y third_party\imgui\LICENSE.txt "%OUT%\Forge\licenses\LICENSE-imgui.txt" >nul
 copy /y data\LICENSE-Roboto.txt "%OUT%\Forge\licenses\" >nul
@@ -41,6 +42,7 @@ cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DNOMINMAX /Iinclude /Ithird_part
 link /nologo /DLL /OUT:"%OUT%\HudFix\plugins\hudfix.dll" /IMPLIB:%OBJ%\hudfix.lib %OBJ%\hudfix\*.obj || exit /b 1
 del /q "%OUT%\HudFix\plugins\hudfix.exp" 2>nul
 copy /y LICENSE "%OUT%\HudFix\LICENSE.txt" >nul
+copy /y LICENSE-MHGU-Forge.txt "%OUT%\HudFix\" >nul
 copy /y third_party\imgui\LICENSE.txt "%OUT%\HudFix\LICENSE-imgui.txt" >nul
 if not exist "%OUT%\HudFix\plugins\hudfix_layouts.ini" copy /y mods\HudFix\hudfix_layouts.ini "%OUT%\HudFix\plugins\" >nul
 
