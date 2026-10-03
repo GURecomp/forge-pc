@@ -2,7 +2,7 @@
 
 A drag-and-drop mod loader for the recompiled PC build of Monster Hunter Generations Ultimate
 (1.4.0), in the spirit of Stracker's Loader for MH World. A port of
-[MHGU Forge](https://github.com/Fexty12573/forge) by Fexty, with his permission.
+[MHGU Forge](https://github.com/Fexty12573/forge) by Fexty, with the author's permission.
 
 Forge PC is not part of the game exe. The exe only carries a small, permanent mod host
 interface (`include/mod_host_api.h`); everything here is installed and updated by copying files.
@@ -95,9 +95,21 @@ the same Dear ImGui version (`forge_api->imgui_version`).
 
 `build.bat` (Visual Studio 2022, Vulkan SDK headers). Output: `dist\mods\0100770008DD8000\`.
 
-## Credits
+## Credits and licenses
 
-- [MHGU Forge](https://github.com/Fexty12573/forge) by Fexty and contributors (MIT): the design,
-  menu and API this is a port of, with permission.
-- [Dear ImGui](https://github.com/ocornut/imgui) (MIT), `third_party/imgui`.
-- Roboto font (`data/Roboto-Medium.ttf`) by Google, Apache License 2.0, as shipped with Forge.
+Forge PC is MIT licensed (`LICENSE`). It builds on:
+
+- **[MHGU Forge](https://github.com/Fexty12573/forge)** by **Fexty**, with contributions by
+  **jeffi2287**: the original Switch mod loader whose design, plugin API, menu and style this
+  is a port of, done with the author's permission. MIT; its notice (Copyright (c) 2020 The
+  Skyline Project, Copyright (c) 2026 Jeffi) is reproduced in `LICENSE`.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut: the menu UI, compiled into
+  `forge.dll` and `hudfix.dll`. MIT, `third_party/imgui/LICENSE.txt`.
+- **Roboto** by Christian Robertson / Google (`data/Roboto-Medium.ttf`), the menu font as
+  shipped with Dear ImGui and MHGU Forge. Apache License 2.0, `data/LICENSE-Roboto.txt`.
+- **[MHGU-Modding](https://github.com/RTHKKona/MHGU-Modding)** by Handburger: file format
+  documentation and templates that HUD Fix's understanding of `.gui` layouts is based on
+  (reference only, no code included).
+
+Details: `THIRD_PARTY_NOTICES.md`. Release builds carry these files in `Forge/licenses/` (and
+`HudFix/LICENSE*.txt`).

@@ -26,6 +26,12 @@ cl %CFLAGS% /c /Fo%OBJ%\ src\loader.cpp src\overlay.cpp third_party\imgui\imgui.
 link /nologo /DLL /OUT:"%OUT%\Forge\forge.dll" /IMPLIB:%OBJ%\forge.lib %OBJ%\*.obj || exit /b 1
 copy /y data\Roboto-Medium.ttf "%OUT%\Forge\fonts\" >nul
 if not exist "%OUT%\Forge\forge.ini" copy /y data\forge.ini "%OUT%\Forge\" >nul
+rem licenses travel with the binaries (MIT / Apache 2.0 notices)
+if not exist "%OUT%\Forge\licenses" mkdir "%OUT%\Forge\licenses"
+copy /y LICENSE "%OUT%\Forge\licenses\LICENSE.txt" >nul
+copy /y THIRD_PARTY_NOTICES.md "%OUT%\Forge\licenses\" >nul
+copy /y third_party\imgui\LICENSE.txt "%OUT%\Forge\licenses\LICENSE-imgui.txt" >nul
+copy /y data\LICENSE-Roboto.txt "%OUT%\Forge\licenses\" >nul
 
 rem example plugin: compiled to check it still builds, not installed
 cl /nologo /O2 /MT /W4 /LD /Iinclude examples\hello\hello.c /Fo%OBJ%\hello.obj /Fe:build\examples\hello.dll /link /IMPLIB:%OBJ%\hello.lib || exit /b 1
@@ -34,6 +40,8 @@ rem HUD Fix mod (plugin with its own Dear ImGui, same version as forge.dll)
 cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DNOMINMAX /Iinclude /Ithird_party\imgui /c /Fo%OBJ%\hudfix\ mods\HudFix\hudfix.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp || exit /b 1
 link /nologo /DLL /OUT:"%OUT%\HudFix\plugins\hudfix.dll" /IMPLIB:%OBJ%\hudfix.lib %OBJ%\hudfix\*.obj || exit /b 1
 del /q "%OUT%\HudFix\plugins\hudfix.exp" 2>nul
+copy /y LICENSE "%OUT%\HudFix\LICENSE.txt" >nul
+copy /y third_party\imgui\LICENSE.txt "%OUT%\HudFix\LICENSE-imgui.txt" >nul
 if not exist "%OUT%\HudFix\plugins\hudfix_layouts.ini" copy /y mods\HudFix\hudfix_layouts.ini "%OUT%\HudFix\plugins\" >nul
 
 echo.

@@ -503,6 +503,8 @@ void DrawMenu() {
                 ImGui::BulletText("jeffi2287");
                 ImGui::SeparatorText("Libraries Used");
                 ImGui::BulletText("Dear ImGui %s", IMGUI_VERSION);
+                ImGui::BulletText("Roboto font (Apache License 2.0)");
+                ImGui::TextDisabled("Licenses: Forge/licenses/");
             }
             if (ImGui::CollapsingHeader("Loaded Plugins", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (PluginCount() == 0) {
