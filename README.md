@@ -12,9 +12,16 @@ interface (`include/mod_host_api.h`); everything here is installed and updated b
 Copy the `mods` folder from the release into the game folder (next to the game exe):
 
 ```
-<game>/mods/0100770008DD8000/Forge/forge.dll        the loader
+<game>/mods/0100770008DD8000/Forge/forge.dll        the loader (Linux: forge.so)
 <game>/mods/0100770008DD8000/Forge/forge.ini        its settings
 <game>/mods/0100770008DD8000/Forge/fonts/...
+```
+
+On Linux, also set the loader in the game's `game_settings.ini` (next to the game binary):
+
+```
+[Mods]
+loader = Forge/forge.so
 ```
 
 Start the game. `Forge/forge.log` shows what loaded. Press **Insert** for the Forge menu.
@@ -25,9 +32,14 @@ Uninstall: delete the `Forge` folder. Without it the game runs exactly as before
 One folder per mod, next to `Forge`:
 
 ```
-<game>/mods/0100770008DD8000/<Mod name>/plugins/*.dll   code (Forge PC plugins)
+<game>/mods/0100770008DD8000/<Mod name>/plugins/        code (Forge PC plugins): *.dll on
+                                                        Windows, *.so on Linux
 <game>/mods/0100770008DD8000/<Mod name>/romfs/...       game files the mod replaces
 ```
+
+File mods (`romfs`) and settings files work on both Windows and Linux as they are. Code plugins
+are built once per system from the same source; a mod can ship its `.dll` and `.so` side by side
+in `plugins/`, and each system loads only its own.
 
 Plugins can be updated while the game runs: Forge loads a copy of each plugin dll
 (`<name>.dll.<n>.live`), so the dll itself can be replaced, and a changed dll is reloaded in game
@@ -43,7 +55,7 @@ Install: copy `dist/mods/0100770008DD8000/HudFix` (or the release zip's `HudFix`
 `Forge`:
 
 ```
-<game>/mods/0100770008DD8000/HudFix/plugins/hudfix.dll
+<game>/mods/0100770008DD8000/HudFix/plugins/hudfix.dll          (Linux: hudfix.so)
 <game>/mods/0100770008DD8000/HudFix/plugins/hudfix_layouts.ini   per-layout placement
 ```
 
@@ -64,7 +76,8 @@ computes. See the comment at the top of `mods/HudFix/hudfix.cpp` for the details
 
 ## Writing a plugin
 
-Plugins are x64 DLLs built against `include/forge_pc.h`. See `examples/hello/hello.c`.
+Plugins are x64 libraries (Windows DLLs, Linux shared objects) built against
+`include/forge_pc.h`. See `examples/hello/hello.c`.
 
 ```c
 #include "forge_pc.h"
@@ -93,7 +106,12 @@ the same Dear ImGui version (`forge_api->imgui_version`).
 
 ## Building
 
-`build.bat` (Visual Studio 2022, Vulkan SDK headers). Output: `dist\mods\0100770008DD8000\`.
+- Windows: `build.bat` (Visual Studio 2022, Vulkan SDK headers). Output:
+  `dist\mods\0100770008DD8000\`.
+- Linux: `./build.sh` (g++ with C++20, Vulkan headers from `libvulkan-dev` or `VULKAN_SDK`).
+  Output: `dist-linux/mods/0100770008DD8000/`. The libraries depend only on glibc (2.34+).
+- Linux plugins: build with `-shared -fPIC -fvisibility=hidden` and export only the `forge_*`
+  entry points (see the version script in `build.sh`), so each plugin keeps its own Dear ImGui.
 
 ## Credits and licenses
 

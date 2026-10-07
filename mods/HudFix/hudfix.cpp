@@ -36,6 +36,7 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -43,6 +44,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include <imgui.h>
 
@@ -1429,6 +1433,7 @@ FORGE_EXPORT void forge_onInit(void) {
         Logf(FORGE_LOG_ERROR, "built with Dear ImGui %s, Forge has %s", IMGUI_VERSION,
              forge_api->imgui_version);
     }
+#ifdef _WIN32
     char path[MAX_PATH]{};
     HMODULE self{};
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -1436,6 +1441,11 @@ FORGE_EXPORT void forge_onInit(void) {
                        reinterpret_cast<LPCSTR>(&forge_onInit), &self);
     GetModuleFileNameA(self, path, MAX_PATH);
     g_ini_path = path;
+#else
+    Dl_info self{};
+    dladdr(reinterpret_cast<const void*>(&forge_onInit), &self);
+    g_ini_path = self.dli_fname ? self.dli_fname : "";
+#endif
     const std::string dir = g_ini_path.substr(0, g_ini_path.find_last_of("\\/") + 1);
     g_ini_path = dir + "hudfix.ini";
     g_layouts_path = dir + "hudfix_layouts.ini";

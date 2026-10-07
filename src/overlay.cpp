@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -14,13 +15,6 @@
 #include <unordered_map>
 #include <vector>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -83,7 +77,7 @@ std::unordered_map<uint64_t, Target> g_targets; // by swapchain VkImage
 std::vector<Retired> g_retired;
 uint64_t g_frame{};
 std::string g_ini_path;
-LARGE_INTEGER g_last_time{};
+std::chrono::steady_clock::time_point g_last_time{};
 std::set<uint32_t> g_plugin_imgui_inited; // PluginUi::generation (new on every hot reload)
 
 PFN_vkVoidFunction LoadVk(const char* name, void*) {
@@ -364,7 +358,7 @@ bool InitImGui() {
     } else {
         io.Fonts->AddFontDefault();
     }
-    QueryPerformanceCounter(&g_last_time);
+    g_last_time = std::chrono::steady_clock::now();
     g_imgui_ready = true;
     return true;
 }
@@ -631,11 +625,9 @@ bool OnPresent(const ModHostPresent* p) {
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = {static_cast<float>(p->width), static_cast<float>(p->height)};
-    LARGE_INTEGER now, freq;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    io.DeltaTime = std::max(1e-4f, static_cast<float>(now.QuadPart - g_last_time.QuadPart) /
-                                       static_cast<float>(freq.QuadPart));
+    const auto now = std::chrono::steady_clock::now();
+    io.DeltaTime =
+        std::max(1e-4f, std::chrono::duration<float>(now - g_last_time).count());
     g_last_time = now;
     io.MouseDrawCursor = g_menu_open.load();
     FeedInputs();

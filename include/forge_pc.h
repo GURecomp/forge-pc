@@ -7,11 +7,12 @@
  * recompiled game. On the Switch, Forge is an ARM module that patches ARM instructions in the
  * game; in a recompiled export the game's code is native x64 compiled from those instructions,
  * so patching them does nothing. Forge PC hooks through the recompiler's dispatcher instead, and
- * plugins are native Windows DLLs (x64). Forge PC itself is a separate install (forge.dll), not
- * part of the game exe: it lives in the export's mod folder like any other mod:
+ * plugins are native x64 libraries: DLLs on Windows, shared objects (.so) on Linux. Forge PC
+ * itself is a separate install (forge.dll / forge.so), not part of the game exe: it lives in
+ * the export's mod folder like any other mod:
  *
- *   <game>/mods/0100770008DD8000/Forge/forge.dll            the loader
- *   <game>/mods/0100770008DD8000/<Mod name>/plugins/*.dll   code of a mod (loaded by Forge)
+ *   <game>/mods/0100770008DD8000/Forge/forge.dll            the loader (Linux: forge.so)
+ *   <game>/mods/0100770008DD8000/<Mod name>/plugins/        code of a mod: *.dll (Linux: *.so)
  *   <game>/mods/0100770008DD8000/<Mod name>/romfs/...       game files the mod replaces
  *
  * The game itself still is a 32-bit ARM program: every game address (code or data) is a u32
@@ -177,7 +178,8 @@ typedef struct ForgeApi {
     uint32_t (*pattern_find)(const char* module, const char* pattern, uint32_t from);
 
     /* the export's mod folder, <game>/mods/<title id> (UTF-8). A plugin's own folder is
-     * <mods_dir>/<its mod name>; GetModuleFileName of the plugin gives the exact path. */
+     * <mods_dir>/<its mod name>; GetModuleFileName (Linux: dladdr) of the plugin gives the exact
+     * path. */
     const char* (*mods_dir)(void);
 
     /* Dear ImGui of the menu: version string (IMGUI_VERSION) the plugin must match, and
@@ -207,7 +209,7 @@ extern const ForgeApi* forge_api;
 /* C and C++ plugins alike: the exports must have unmangled (C) names. In C++, also put the
  * forge_on* entry points in an extern "C" block (or prefix them with FORGE_EXTERN_C). */
 #define FORGE_PLUGIN_DEFINE_API                                                                    \
-    FORGE_EXTERN_C const ForgeApi* forge_api = NULL;                                               \
+    const ForgeApi* forge_api = NULL; /* C linkage from the declaration above */                  \
     FORGE_EXTERN_C FORGE_EXPORT void forge_setApi(const ForgeApi* api) { forge_api = api; }
 
 #ifdef __cplusplus

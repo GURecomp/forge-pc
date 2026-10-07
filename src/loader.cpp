@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -22,16 +23,8 @@
 #include <unordered_map>
 #include <vector>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <intrin.h>
-
 #include "forge_internal.h"
+#include "platform.h"
 
 /// A loaded plugin's lifetime guard: callbacks into it count themselves in `inflight`; once
 /// `dead` is set (hot reload) no new callback starts, and the DLL is freed when the count is
@@ -130,7 +123,8 @@ struct Plugin {
     std::filesystem::path source; // <mod>/plugins/<name>.dll (never loaded itself: stays writable)
     std::filesystem::path live;   // the copy actually loaded: <name>.dll.<n>.live, same folder
     ForgePluginState* state{};
-    HMODULE handle{};
+    plat::Lib handle{};
+    const void* base{};           // load address (identifies its code, e.g. a hook's caller)
     ForgePluginInfo info{};
     void (*on_init)(){};
     void (*on_update)(float){};
@@ -143,7 +137,8 @@ std::atomic<bool> g_plugins_loaded{false};
 
 // hot reload: which plugin a code address belongs to (hooks remember their plugin)
 std::mutex g_owner_lock;
-std::unordered_map<HMODULE, ForgePluginState*> g_owners;
+std::unordered_map<const void*, ForgePluginState*> g_owners; // module base -> plugin
+
 std::atomic<u32> g_live_counter{0};
 std::atomic<u32> g_ui_generation{0};
 
@@ -488,10 +483,7 @@ ForgeHook* HookCreate(u32 target, ForgeHookPre pre, ForgeHookPost post, void* us
     auto* hook = new ForgeHook{target, pre, post, user};
     {
         // the caller's module = the plugin that owns the hook (dropped on hot reload)
-        HMODULE mod{};
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               static_cast<LPCWSTR>(_ReturnAddress()), &mod)) {
+        if (const void* mod = plat::ModuleOf(FORGE_RETURN_ADDRESS())) {
             std::scoped_lock lk{g_owner_lock};
             const auto it = g_owners.find(mod);
             hook->owner = it == g_owners.end() ? nullptr : it->second;
@@ -574,10 +566,10 @@ const ForgeApi kApi = {
 
 template <typename T>
 T Symbol(const Plugin& p, const char* name) {
-    return reinterpret_cast<T>(GetProcAddress(p.handle, name));
+    return reinterpret_cast<T>(plat::LibSym(p.handle, name));
 }
 
-/// Every <mods dir>/<mod>/plugins/*.dll, mods in name order.
+/// Every <mods dir>/<mod>/plugins/*.dll (*.so on Linux), mods in name order.
 std::vector<std::filesystem::path> FindPluginFiles() {
     std::vector<std::filesystem::path> files;
     std::error_code ec;
@@ -592,7 +584,7 @@ std::vector<std::filesystem::path> FindPluginFiles() {
     for (const auto& dir : mod_dirs) {
         std::vector<std::filesystem::path> dlls;
         for (const auto& e : std::filesystem::directory_iterator(dir / "plugins", ec)) {
-            if (e.is_regular_file(ec) && e.path().extension() == ".dll") {
+            if (e.is_regular_file(ec) && e.path().extension() == plat::kLibExt) {
                 dlls.push_back(e.path());
             }
         }
@@ -616,10 +608,11 @@ void FreePlugin(Plugin& p) {
     if (p.handle) {
         {
             std::scoped_lock lk{g_owner_lock};
-            g_owners.erase(p.handle);
+            g_owners.erase(p.base);
         }
-        FreeLibrary(p.handle);
+        plat::LibClose(p.handle);
         p.handle = nullptr;
+        p.base = nullptr;
     }
     std::error_code ec;
     if (!p.live.empty()) {
@@ -632,7 +625,7 @@ void FreePlugin(Plugin& p) {
 bool LoadOne(const std::filesystem::path& path, Plugin& p) {
     p.file = Utf8(path.parent_path().parent_path().filename() / path.filename());
     p.source = path;
-    // the copy sits in the same folder: the plugin's own folder (GetModuleFileName) and the
+    // the copy sits in the same folder: the plugin's own folder (GetModuleFileName / dladdr) and the
     // dependencies next to it stay the same
     std::error_code ec;
     p.live = path;
@@ -644,21 +637,21 @@ bool LoadOne(const std::filesystem::path& path, Plugin& p) {
         p.live.clear();
         return false;
     }
-    p.handle = LoadLibraryExW(p.live.wstring().c_str(), nullptr,
-                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    std::string error;
+    p.handle = plat::LibOpen(p.live, error);
     if (!p.handle) {
-        Log(FORGE_LOG_ERROR, "%s: could not be loaded (error %lu)", p.file.c_str(),
-            GetLastError());
+        Log(FORGE_LOG_ERROR, "%s: could not be loaded (%s)", p.file.c_str(), error.c_str());
         FreePlugin(p);
         return false;
     }
     p.state = new ForgePluginState{};
-    {
-        std::scoped_lock lk{g_owner_lock};
-        g_owners[p.handle] = p.state;
-    }
     const auto set_api = Symbol<void (*)(const ForgeApi*)>(p, "forge_setApi");
     const auto on_load = Symbol<void (*)(ForgePluginInfo*)>(p, "forge_onLoad");
+    p.base = on_load ? plat::ModuleOf(reinterpret_cast<const void*>(on_load)) : nullptr;
+    if (p.base) {
+        std::scoped_lock lk{g_owner_lock};
+        g_owners[p.base] = p.state;
+    }
     if (!set_api || !on_load) {
         Log(FORGE_LOG_WARN, "%s: not a Forge PC plugin (no forge_setApi/forge_onLoad)",
             p.file.c_str());
@@ -727,7 +720,7 @@ void LoadPlugins() {
 // A plugin dll that changed (a build finished: same time and size on two polls a second apart)
 // or the menu's Reload button: on the game thread the plugin leaves the plugin list (no more
 // menu / update calls), its hooks are dropped and it is marked dead (hook callbacks in flight
-// finish, no new ones start). Once nothing runs inside it: forge_onUnload, FreeLibrary, load
+// finish, no new ones start). Once nothing runs inside it: forge_onUnload, unload it, load
 // the new copy, forge_onInit, back in its place in the list.
 
 void RequestReload(const std::filesystem::path& source) {
@@ -741,7 +734,7 @@ void RequestReload(const std::filesystem::path& source) {
 void WatchPlugins() {
     while (!g_watch_stop.load()) {
         for (int i = 0; i < 10 && !g_watch_stop.load(); ++i) {
-            Sleep(100);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         std::scoped_lock lk{g_reload_lock};
         for (auto& w : g_watch) {

@@ -3,3 +3,5 @@ dist/
 *.obj
 *.exp
 *.lib
+build-linux/
+dist-linux/
