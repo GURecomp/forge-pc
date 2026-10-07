@@ -61,7 +61,7 @@ extern "C" {
 
 #define FORGE_PC_VERSION_MAJOR 0
 #define FORGE_PC_VERSION_MINOR 2
-#define FORGE_PC_VERSION_PATCH 0
+#define FORGE_PC_VERSION_PATCH 1
 
 #ifdef _WIN32
 #define FORGE_EXPORT __declspec(dllexport)
