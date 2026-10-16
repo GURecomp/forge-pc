@@ -1,6 +1,6 @@
 # Third-party notices
 
-Forge PC (the loader `forge.dll`, the plugin SDK and the HUD Fix plugin) includes or ships
+Forge PC (the loader `forge.dll`, the plugin SDK and the UI Fix plugin) includes or ships
 the following third-party work.
 
 ## MHGU Forge
@@ -13,7 +13,7 @@ the following third-party work.
 
 ## Dear ImGui
 
-- What: the menu UI, compiled into `forge.dll` and `hudfix.dll` (`third_party/imgui`,
+- What: the menu UI, compiled into `forge.dll` and `uifix.dll` (`third_party/imgui`,
   v1.92.8, with the Vulkan backend).
 - Author: Omar Cornut and contributors, https://github.com/ocornut/imgui
 - License: MIT, Copyright (c) 2014-2026 Omar Cornut. Full text:
@@ -30,6 +30,6 @@ the following third-party work.
 ## References (no code included)
 
 - MHGU-Modding by Handburger (https://github.com/RTHKKona/MHGU-Modding, MIT): file format
-  documentation and 010 Editor templates. HUD Fix's understanding of the `.gui` layout format
+  documentation and 010 Editor templates. UI Fix's understanding of the `.gui` layout format
   came from them.
 - Skyline (https://github.com/skyline-dev/skyline): the base MHGU Forge is built on.

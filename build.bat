@@ -17,9 +17,9 @@ set "OUT=dist\mods\0100770008DD8000"
 set "OBJ=build\obj"
 if not exist "%OBJ%" mkdir "%OBJ%"
 if not exist "%OUT%\Forge\fonts" mkdir "%OUT%\Forge\fonts"
-if not exist "%OUT%\HudFix\plugins" mkdir "%OUT%\HudFix\plugins"
+if not exist "%OUT%\UIFix\plugins\presets" mkdir "%OUT%\UIFix\plugins\presets"
 if not exist "build\examples" mkdir "build\examples"
-if not exist "%OBJ%\hudfix" mkdir "%OBJ%\hudfix"
+if not exist "%OBJ%\uifix" mkdir "%OBJ%\uifix"
 
 rem the build folder's path stays out of the binaries (assert strings)
 set "CFLAGS=/nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DVK_NO_PROTOTYPES /DIMGUI_IMPL_VULKAN_NO_PROTOTYPES /DNOMINMAX /d1trimfile:"%CD%\\" /Iinclude /Ithird_party\imgui /I"%VULKAN_SDK%\Include""
@@ -38,14 +38,15 @@ copy /y data\LICENSE-Roboto.txt "%OUT%\Forge\licenses\" >nul
 rem example plugin: compiled to check it still builds, not installed
 cl /nologo /O2 /MT /W4 /LD /Iinclude examples\hello\hello.c /Fo%OBJ%\hello.obj /Fe:build\examples\hello.dll /link /IMPLIB:%OBJ%\hello.lib || exit /b 1
 
-rem HUD Fix mod (plugin with its own Dear ImGui, same version as forge.dll)
-cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DNOMINMAX /d1trimfile:"%CD%\\" /Iinclude /Ithird_party\imgui /c /Fo%OBJ%\hudfix\ mods\HudFix\hudfix.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp || exit /b 1
-link /nologo /DLL /OUT:"%OUT%\HudFix\plugins\hudfix.dll" /IMPLIB:%OBJ%\hudfix.lib %OBJ%\hudfix\*.obj || exit /b 1
-del /q "%OUT%\HudFix\plugins\hudfix.exp" 2>nul
-copy /y LICENSE "%OUT%\HudFix\LICENSE.txt" >nul
-copy /y LICENSE-MHGU-Forge.txt "%OUT%\HudFix\" >nul
-copy /y third_party\imgui\LICENSE.txt "%OUT%\HudFix\LICENSE-imgui.txt" >nul
-if not exist "%OUT%\HudFix\plugins\hudfix_layouts.ini" copy /y mods\HudFix\hudfix_layouts.ini "%OUT%\HudFix\plugins\" >nul
+rem UI Fix mod (plugin with its own Dear ImGui, same version as forge.dll)
+cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DNOMINMAX /d1trimfile:"%CD%\\" /Iinclude /Ithird_party\imgui /c /Fo%OBJ%\uifix\ mods\UIFix\uifix.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp || exit /b 1
+link /nologo /DLL /OUT:"%OUT%\UIFix\plugins\uifix.dll" /IMPLIB:%OBJ%\uifix.lib %OBJ%\uifix\*.obj || exit /b 1
+del /q "%OUT%\UIFix\plugins\uifix.exp" 2>nul
+copy /y LICENSE "%OUT%\UIFix\LICENSE.txt" >nul
+copy /y LICENSE-MHGU-Forge.txt "%OUT%\UIFix\" >nul
+copy /y third_party\imgui\LICENSE.txt "%OUT%\UIFix\LICENSE-imgui.txt" >nul
+copy /y mods\UIFix\README.md "%OUT%\UIFix\" >nul
+copy /y mods\UIFix\presets\*.ini "%OUT%\UIFix\plugins\presets\" >nul
 
 echo.
-echo Built: %OUT%\Forge\forge.dll  and  %OUT%\HudFix\plugins\hudfix.dll
+echo Built: %OUT%\Forge\forge.dll  and  %OUT%\UIFix\plugins\uifix.dll

@@ -46,33 +46,26 @@ Plugins can be updated while the game runs: Forge loads a copy of each plugin dl
 (also the **Reload** button in the menu). Turn it off with `[plugins] hot_reload = false` in
 `Forge/forge.ini`.
 
-## Example mod: HUD Fix (working)
+## Example mod: UI Fix (working)
 
-`mods/HudFix` is a complete mod: it keeps the HUD and menus in proportion on screens wider than
-16:9 (21:9, 32:9, ...), where the game stretches them.
+`mods/UIFix` is a complete mod, and a larger example of a plugin with its own Dear ImGui: it
+undoes the stretching of the HUD and menus on screens wider than 16:9 (21:9, 32:9, ...), and lets
+you scale and move single parts of the UI (health bar, map, item bar, menus...) by dragging them
+on screen. See `mods/UIFix/README.md`.
 
-Install: copy `dist/mods/0100770008DD8000/HudFix` (or the release zip's `HudFix` folder) next to
+Install: copy `dist/mods/0100770008DD8000/UIFix` (or the release zip's `UIFix` folder) next to
 `Forge`:
 
 ```
-<game>/mods/0100770008DD8000/HudFix/plugins/hudfix.dll          (Linux: hudfix.so)
-<game>/mods/0100770008DD8000/HudFix/plugins/hudfix_layouts.ini   per-layout placement
+<game>/mods/0100770008DD8000/UIFix/plugins/uifix.dll          (Linux: uifix.so)
+<game>/mods/0100770008DD8000/UIFix/plugins/presets/*.ini      the defaults
 ```
 
-In game, Insert opens the Forge menu, then **HUD Fix**:
-
-- **Anchor to edges** (each element to its own side of the screen) or **Constrain UI to 16:9**
-  (everything in a centred 16:9 area, like newer games).
-- **Layouts on screen**: every loaded layout with its mode: `keep` (unchanged, for full-screen
-  pictures), `left` / `center` / `right`, `follow`, and a **game-side** box for layouts whose
-  scrolling icons get cut off otherwise. Saved to `hudfix_layouts.ini`; the shipped file covers
-  the HUD, menus, maps and town screens.
-- HUD size: normal, native (your resolution) or custom.
+In game, Insert opens the Forge menu, then **Plugin UI > UI Fix**.
 
 How it works: the plugin hooks the game's GUI drawing and squeezes each layout horizontally
-around its anchor (16:9 / your aspect) when it is drawn, without changing any position the game
-computes. See the comment at the top of `mods/HudFix/hudfix.cpp` for the details and addresses
-(game version 1.4.0).
+around its anchor when it is drawn, without changing any position the game computes. See the
+comment at the top of `mods/UIFix/uifix.cpp` for the details and addresses (game version 1.4.0).
 
 ## Writing a plugin
 
@@ -213,12 +206,12 @@ Forge PC is MIT licensed (`LICENSE`). It builds on:
   is a port of, done with the author's permission. MIT; its notice (Copyright (c) 2020 The
   Skyline Project, Copyright (c) 2026 Jeffi) is reproduced in `LICENSE-MHGU-Forge.txt`.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut: the menu UI, compiled into
-  `forge.dll` and `hudfix.dll`. MIT, `third_party/imgui/LICENSE.txt`.
+  `forge.dll` and `uifix.dll`. MIT, `third_party/imgui/LICENSE.txt`.
 - **Roboto** by Christian Robertson / Google (`data/Roboto-Medium.ttf`), the menu font as
   shipped with Dear ImGui and MHGU Forge. Apache License 2.0, `data/LICENSE-Roboto.txt`.
 - **[MHGU-Modding](https://github.com/RTHKKona/MHGU-Modding)** by Handburger: file format
-  documentation and templates that HUD Fix's understanding of `.gui` layouts is based on
+  documentation and templates that UI Fix's understanding of `.gui` layouts is based on
   (reference only, no code included).
 
 Details: `THIRD_PARTY_NOTICES.md`. Release builds carry these files in `Forge/licenses/` (and
-`HudFix/LICENSE*.txt`).
+`UIFix/LICENSE*.txt`).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Forge PC for Linux (forge.so) plus the HUD Fix plugin, and lays out an install folder:
+# Builds Forge PC for Linux (forge.so) plus the UI Fix plugin, and lays out an install folder:
 # dist-linux/mods/0100770008DD8000/  -> copy "mods" into the game folder.
 # Needs g++ (C++20) and the Vulkan headers (libvulkan-dev, or VULKAN_SDK=<sdk dir>); only the
 # headers are used, Vulkan functions come from the game.
@@ -21,8 +21,8 @@ fi
 
 OUT=dist-linux/mods/0100770008DD8000
 OBJ=build-linux/obj
-mkdir -p build-linux "$OBJ/forge" "$OBJ/hudfix" "$OUT/Forge/fonts" "$OUT/Forge/licenses" \
-  "$OUT/HudFix/plugins" build-linux/examples
+mkdir -p build-linux "$OBJ/forge" "$OBJ/uifix" "$OUT/Forge/fonts" "$OUT/Forge/licenses" \
+  "$OUT/UIFix/plugins/presets" build-linux/examples
 
 # Hidden symbols + -Bsymbolic: every .so keeps its own Dear ImGui and C++ runtime bits, only the
 # entry points (modhost_attach / forge_*) are visible. Static libstdc++: no dependency on the
@@ -65,14 +65,15 @@ cp -f third_party/imgui/LICENSE.txt "$OUT/Forge/licenses/LICENSE-imgui.txt"
 "$CC" -O2 -fPIC -fvisibility=hidden -Wall -Iinclude -shared -Wl,--no-undefined \
   examples/hello/hello.c -o build-linux/examples/hello.so
 
-# HUD Fix mod (plugin with its own Dear ImGui, same version as forge.so)
-build_objs "$OBJ/hudfix" "$COMMON -std=c++20 -Wall -Iinclude -Ithird_party/imgui" \
-  mods/HudFix/hudfix.cpp $IMGUI
-"$CXX" $LDFLAGS -Wl,--version-script=build-linux/plugin.map   -o "$OUT/HudFix/plugins/hudfix.so" "$OBJ"/hudfix/*.o -ldl
-cp -f LICENSE "$OUT/HudFix/LICENSE.txt"
-cp -f LICENSE-MHGU-Forge.txt "$OUT/HudFix/"
-cp -f third_party/imgui/LICENSE.txt "$OUT/HudFix/LICENSE-imgui.txt"
-[ -f "$OUT/HudFix/plugins/hudfix_layouts.ini" ] || cp mods/HudFix/hudfix_layouts.ini "$OUT/HudFix/plugins/"
+# UI Fix mod (plugin with its own Dear ImGui, same version as forge.so)
+build_objs "$OBJ/uifix" "$COMMON -std=c++20 -Wall -Iinclude -Ithird_party/imgui" \
+  mods/UIFix/uifix.cpp $IMGUI
+"$CXX" $LDFLAGS -Wl,--version-script=build-linux/plugin.map   -o "$OUT/UIFix/plugins/uifix.so" "$OBJ"/uifix/*.o -ldl
+cp -f LICENSE "$OUT/UIFix/LICENSE.txt"
+cp -f LICENSE-MHGU-Forge.txt "$OUT/UIFix/"
+cp -f third_party/imgui/LICENSE.txt "$OUT/UIFix/LICENSE-imgui.txt"
+cp -f mods/UIFix/README.md "$OUT/UIFix/"
+cp -f mods/UIFix/presets/*.ini "$OUT/UIFix/plugins/presets/"
 
 echo
-echo "Built: $OUT/Forge/forge.so  and  $OUT/HudFix/plugins/hudfix.so"
+echo "Built: $OUT/Forge/forge.so  and  $OUT/UIFix/plugins/uifix.so"
