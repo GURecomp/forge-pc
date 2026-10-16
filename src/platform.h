@@ -17,6 +17,8 @@
 #define FORGE_RETURN_ADDRESS() _ReturnAddress()
 #else
 #include <dlfcn.h>
+#include <link.h>
+#include <algorithm>
 #define FORGE_RETURN_ADDRESS() __builtin_return_address(0)
 #endif
 
@@ -67,6 +69,48 @@ inline void LibClose(Lib lib) {
     dlclose(lib);
 #endif
 }
+
+/// Size in bytes of the loaded image at `base` (0 if unknown): the address range of a plugin's
+/// code, for telling whose code a fault happened in without taking a lock.
+#ifdef _WIN32
+inline size_t ImageSize(const void* base) {
+    if (!base) {
+        return 0;
+    }
+    const auto* dos = static_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return 0;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        static_cast<const char*>(base) + dos->e_lfanew);
+    return nt->Signature == IMAGE_NT_SIGNATURE ? nt->OptionalHeader.SizeOfImage : 0;
+}
+#else
+inline size_t ImageSize(const void* base) {
+    struct Search {
+        const void* base;
+        size_t size;
+    } search{base, 0};
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, size_t, void* data) -> int {
+            auto* s = static_cast<Search*>(data);
+            if (reinterpret_cast<const void*>(info->dlpi_addr) != s->base) {
+                return 0;
+            }
+            size_t end = 0;
+            for (int i = 0; i < info->dlpi_phnum; ++i) {
+                const auto& ph = info->dlpi_phdr[i];
+                if (ph.p_type == PT_LOAD) {
+                    end = std::max<size_t>(end, ph.p_vaddr + ph.p_memsz);
+                }
+            }
+            s->size = end;
+            return 1;
+        },
+        &search);
+    return search.size;
+}
+#endif
 
 /// Base address of the loaded module containing `addr` (nullptr if none): identifies which
 /// plugin a code address belongs to.

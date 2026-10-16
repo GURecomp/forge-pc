@@ -1,0 +1,9 @@
+[package]
+name = "forge-pc"
+description = "Safe Rust SDK for Forge PC plugins (MHGU 1.4.0 recompiled PC build)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+forge-pc-sys = { path = "../forge-pc-sys" }

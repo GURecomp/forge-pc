@@ -27,7 +27,7 @@ mkdir -p build-linux "$OBJ/forge" "$OBJ/hudfix" "$OUT/Forge/fonts" "$OUT/Forge/l
 # Hidden symbols + -Bsymbolic: every .so keeps its own Dear ImGui and C++ runtime bits, only the
 # entry points (modhost_attach / forge_*) are visible. Static libstdc++: no dependency on the
 # player's version.
-COMMON="-O2 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden"
+COMMON="-ffile-prefix-map=$PWD=. -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden"
 LDFLAGS="-shared -Wl,-Bsymbolic -Wl,--no-undefined -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc"
 # export lists: the loader exports modhost_attach, plugins their forge_* entry points
 printf '{ global: modhost_attach; local: *; };
@@ -51,7 +51,7 @@ build_objs() { # <objdir> <flags> <sources...>
 
 FORGE_FLAGS="$COMMON -std=c++20 -Wall -DVK_NO_PROTOTYPES -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES \
   -Iinclude -Ithird_party/imgui $VK_INC"
-build_objs "$OBJ/forge" "$FORGE_FLAGS" src/loader.cpp src/overlay.cpp $IMGUI \
+build_objs "$OBJ/forge" "$FORGE_FLAGS" src/loader.cpp src/overlay.cpp src/trace.cpp src/crash.cpp src/config.cpp $IMGUI \
   third_party/imgui/imgui_demo.cpp third_party/imgui/backends/imgui_impl_vulkan.cpp
 "$CXX" $LDFLAGS -Wl,--version-script=build-linux/forge.map -o "$OUT/Forge/forge.so" "$OBJ"/forge/*.o -ldl -lpthread
 

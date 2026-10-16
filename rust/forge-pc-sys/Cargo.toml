@@ -1,0 +1,6 @@
+[package]
+name = "forge-pc-sys"
+description = "Raw bindings to the Forge PC plugin API (include/forge_pc.h)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

@@ -104,6 +104,97 @@ dispatcher instead of ARM trampolines; byte patches of code have no effect (the 
 recompiled), so use hooks. ImGui: export `forge_onImGuiInit/Render/FreeRender` and build with
 the same Dear ImGui version (`forge_api->imgui_version`).
 
+### Replacing a function (0.4)
+
+`hook_override` runs your function instead of the game's; `call_original` runs the game's
+function (or the next override down) from inside it:
+
+```c
+static void my_override(ForgeCpu* cpu, void* user) {
+    uint32_t args[2] = {cpu->r[0], cpu->r[1] + 1};          /* change an argument */
+    ForgeCallResult res;
+    if (forge_api->call_original(forge_api->mem_getModuleBase("main") + 0x1C358,
+                                 args, 2, NULL, 0, &res))
+        cpu->r[0] = res.r0;                                  /* return value of the override */
+}
+/* in forge_onInit: */
+forge_api->hook_override(forge_api->mem_getModuleBase("main") + 0x1C358, my_override, NULL);
+```
+
+Order of a call: pre hooks (the first to return `FORGE_HOOK_RETURN` ends it) -> override ->
+post hooks, which run once, after the override returns. With several overrides on one function
+the one loaded last is the outermost (a plugin that is hot reloaded or switched on again counts
+as loaded last); its `call_original` reaches the next one down. Overrides go away with their
+plugin. Calls made with `call` never fire hooks or overrides. Down a chain of several
+overrides only the register arguments (r0-r3, s0-s15) are passed on.
+
+## Settings files for plugins (0.5)
+
+`config_open("mymod.ini")` opens `<mods dir>/<your mod folder>/mymod.ini` (relative names only).
+The typed getters (`config_int`, `config_float`, `config_bool`, `config_string`) take a default
+and remember it: `config_save` writes the keys the file doesn't have yet, so a first start
+creates a complete file, and keeps comments and everything else in it. `config_set` +
+`config_save` store a value. `config_changed` is true once after the file changed on disk (a
+hand edit) and has re-read it: poll it in `forge_onUpdate` for live settings. Handles are freed
+with the plugin. Rust: `forge_pc::Config`.
+
+## Drawing with your own Vulkan commands (0.6)
+
+Export `forge_onPresent(const ForgePresent* p)`: it runs once per presented frame on the
+presentation thread, after the finished frame is in the swapchain image and before Forge's own
+menu. `p` has the Vulkan instance, device, queue, the command buffer being recorded, the image,
+format and size, and `lock_queue` / `unlock_queue` for submits of your own (the queue is shared
+with the emulator). The image is in `TRANSFER_DST_OPTIMAL` on entry: transition it yourself to
+draw and put it back before returning. You only see the final composed image (no game passes,
+depth or shaders). Resources you create are yours to free (`forge_onUnload`, swapchain
+recreation). Rust: set `WANTS_PRESENT = true` and implement `Plugin::present`; ask for minor 6.
+
+## Menu: Reset scripts
+
+**Loaded Plugins -> Reset scripts** looks for plugin files again and loads every plugin of an
+enabled mod that is not loaded: a mod folder copied in while the game runs, plugins that were
+off, plugins whose hot reload failed. Plugins already loaded are left alone (the per-plugin
+**Reload** button restarts one) and mods switched off in the **Mods** list stay off. No restart
+is needed to add a mod.
+
+## Menu: mods on and off
+
+The **Mods** list in the Forge menu (Insert) has a checkbox per mod folder. Switching a mod off
+drops its hooks, waits until none of its callbacks is running, calls `forge_onUnload` and
+unloads its plugins, the same path as a hot reload; switching it on loads them again. The state
+is saved in `forge.ini` (`[mods]`, `<Mod folder> = off`), disabled mods stay listed. Game files
+(`romfs/`) are applied by the game when it starts: Forge does not switch them (the menu says
+"restart required").
+
+## Tracing calls (forge.ini)
+
+To see which game functions run when you do something in game, without writing a plugin, list
+candidates in `forge.ini` (offsets in `main`):
+
+```ini
+[trace]
+enabled = true
+0x1C358 = limit=50
+0x2A410 = limit=10, args=true
+0x3B000 = limit=20, ret=true
+```
+
+`trace.log` (next to `forge.log`) gets one line per call: time, game update number, function,
+call count, thread, caller (LR) and with `args=true` r0-r3 (`ret=true` adds a line with the
+return value). `limit=` is the number of lines per function (it keeps counting, a line says when
+the limit is hit; 0 = no limit, default 100). The trace hooks run before any plugin's, so they
+also see calls a plugin skips. Edit `forge.ini` while the game runs: added, changed and removed
+lines apply within a second or two.
+
+## When a plugin crashes
+
+If the game faults inside a plugin, or inside the game code one of a plugin's callbacks was
+running, `forge.log` has a `[crash]` line with the plugin's name, its dll, the numbered
+`.live` copy it was loaded as (`<name>.dll.<n>.live`, also logged when each plugin loads), the
+hook address and the fault address. With `[crash] auto_disable = true` in `forge.ini` the mod
+that was involved is switched off at the next launch if the game did not exit cleanly after
+the report (switch it on again in the menu).
+
 ## Building
 
 - Windows: `build.bat` (Visual Studio 2022, Vulkan SDK headers). Output:

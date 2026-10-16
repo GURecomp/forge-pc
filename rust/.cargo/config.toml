@@ -1,0 +1,3 @@
+# Static C runtime, like the C++ side (/MT): players need no redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

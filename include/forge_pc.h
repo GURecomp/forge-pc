@@ -31,7 +31,10 @@
  *                                              with the same Dear ImGui version (api->imgui_version)
  *   void forge_onImGuiRender(void)             inside Forge's menu window ("Plugin UI")
  *   void forge_onImGuiFreeRender(void)         every frame, for windows/overlays of your own
- * ImGui callbacks run on the presentation thread (not a game thread: api->call fails there).
+ *   void forge_onPresent(const ForgePresent* p) (0.6) every presented frame, raw Vulkan: record
+ *                                              your own draw commands (see ForgePresent)
+ * ImGui and present callbacks run on the presentation thread (not a game thread: api->call
+ * fails there).
  * One translation unit of the plugin must contain FORGE_PLUGIN_DEFINE_API (it exports the
  * function through which the loader hands over the API table).
  *
@@ -60,8 +63,8 @@ extern "C" {
 #endif
 
 #define FORGE_PC_VERSION_MAJOR 0
-#define FORGE_PC_VERSION_MINOR 2
-#define FORGE_PC_VERSION_PATCH 1
+#define FORGE_PC_VERSION_MINOR 6
+#define FORGE_PC_VERSION_PATCH 0
 
 #ifdef _WIN32
 #define FORGE_EXPORT __declspec(dllexport)
@@ -79,6 +82,38 @@ typedef struct ForgePluginInfo {
     ForgeVersion required_ver; /* the loader must have the same major and at least this minor */
     char name[64];
 } ForgePluginInfo;
+
+/* One presented frame (0.6), passed to forge_onPresent on the presentation thread (always the
+ * same thread). The finished frame is already blitted into the swapchain image. Vulkan handles
+ * are void* / uint64_t so plugins need no Vulkan headers (load functions through
+ * vk_get_instance_proc).
+ *   - Record into vk_command_buffer (it is being recorded for this present; do not end or
+ *     submit it). To draw, transition vk_image from TRANSFER_DST_OPTIMAL (its layout on entry)
+ *     yourself and put it back to TRANSFER_DST_OPTIMAL before returning, whatever you did.
+ *   - Anything that needs a submit of your own (a texture upload) goes to vk_queue between
+ *     lock_queue and unlock_queue: the queue is shared with the emulator.
+ *   - Resources you create are yours to destroy (forge_onUnload, or when image_count / the
+ *     size changes the swapchain is recreated). Callbacks run before Forge's own menu, which
+ *     is drawn on top. Only the final composed image is visible: no game render passes, depth
+ *     or shaders. */
+typedef struct ForgePresent {
+    uint32_t size;                 /* sizeof of this struct in the loader: check before new fields */
+    uint32_t vk_api_version;
+    void* vk_instance;             /* VkInstance */
+    void* vk_get_instance_proc;    /* PFN_vkGetInstanceProcAddr */
+    void* vk_physical_device;      /* VkPhysicalDevice */
+    void* vk_device;               /* VkDevice */
+    void* vk_queue;                /* VkQueue */
+    uint32_t vk_queue_family;
+    void* vk_command_buffer;       /* VkCommandBuffer */
+    uint64_t vk_image;             /* VkImage, TRANSFER_DST_OPTIMAL */
+    uint32_t vk_format;            /* VkFormat of views on that image */
+    uint32_t width, height;
+    uint32_t image_count;
+    uint32_t image_index;
+    void (*lock_queue)(void);
+    void (*unlock_queue)(void);
+} ForgePresent;
 
 /* The guest CPU state at a hook (same layout as the recompiler's context). r[13] = sp,
  * r[14] = lr, r[15] = pc. VFP: s[0..31] / d[0..31] overlap like on ARM (d0 = s0:s1). */
@@ -114,7 +149,15 @@ typedef enum ForgeHookAction {
 typedef ForgeHookAction (*ForgeHookPre)(ForgeCpu* cpu, void* user);
 typedef void (*ForgeHookPost)(ForgeCpu* cpu, const uint32_t args[4], void* user);
 
+/* Override (0.4): runs instead of the hooked function. cpu is the state at entry (arguments in
+ * r0-r3 / the stack / s0-s15); leave the return value in it (r0 (r1), vfp.s[0] / vfp.d[0]). The
+ * function itself runs only if the override calls forge_api->call_original. */
+typedef void (*ForgeOverride)(ForgeCpu* cpu, void* user);
+
 typedef struct ForgeHook ForgeHook;
+
+/* A plugin's settings file (0.5), see config_open. Opaque. */
+typedef struct ForgeConfig ForgeConfig;
 
 typedef struct ForgeCallResult {
     uint32_t r0, r1; /* integer / pointer / 64-bit (r0 low) return */
@@ -196,6 +239,61 @@ typedef struct ForgeApi {
      * valid until mem_free or the end of the process: free your blocks in forge_onUnload. */
     uint32_t (*mem_alloc)(uint32_t size, uint32_t align);
     void (*mem_free)(uint32_t addr);
+
+    /* --- 0.3 --- (check forge_api->size before use) */
+
+    /* size in pixels of the picture the game is shown in (the window / swapchain image), as of
+     * the last frame presented; false before the first present. The game itself may render at
+     * another size and be stretched to this (e.g. 1920x1080 shown on 3440x1440). */
+    bool (*screen_size)(uint32_t* width, uint32_t* height);
+
+    /* --- 0.4 --- (check forge_api->size before use; list "required_ver" 0.4) */
+
+    /* Calls a guest function like `call`, but when `function` is overridden and the caller is
+     * that override, the call goes to the next override down (the one registered before it)
+     * and, once there are none, to the real function. Only the calling thread is affected: no
+     * hook, override or trace fires inside the call, and the post hooks of the outer call fire
+     * once, after the override returns. Call it from the override (same game thread). Same
+     * rules and limits as `call` (no system calls inside; fails on the ImGui thread). Down a
+     * chain of several overrides only the register arguments (r0-r3, s0-s15) are passed on;
+     * stack arguments (5th and later) are those of the original call. */
+    bool (*call_original)(uint32_t function, const uint32_t* args, uint32_t count,
+                          const float* fargs, uint32_t fcount, ForgeCallResult* out);
+
+    /* Replaces the function at `target` (same address rules as hook_create; NULL if it isn't
+     * the start of a recompiled block). Order of a call: pre hooks (the first to return
+     * FORGE_HOOK_RETURN ends it) -> override -> post hooks, which run once, after the override
+     * returns, and see its return value. With several overrides on one function the one
+     * registered last (loaded last) is the outermost; its call_original reaches the next.
+     * Removed with the plugin on unload / hot reload; hook_enable(false) lets the function run
+     * as if there were no override. The override does not apply to calls made with `call`
+     * (hooks never fire inside those). */
+    ForgeHook* (*hook_override)(uint32_t target, ForgeOverride fn, void* user);
+
+    /* --- 0.5: settings files (ini) --- (check forge_api->size before use)
+     *
+     * config_open("mymod.ini") opens <mods dir>/<your mod folder>/mymod.ini (a relative name,
+     * no "..": subfolders are fine). A missing file is fine: the getters then return their
+     * defaults, and config_save creates it. Syntax: [section] key = value, ';' or '#' lines are
+     * comments. Returns NULL for a bad name. The handle belongs to the plugin and is freed with
+     * it (unload / hot reload); thread-safe.
+     *
+     * Every getter takes a default and remembers it: config_save writes the keys the file
+     * doesn't have yet (a first start makes a complete file), changes the ones set with
+     * config_set, and leaves the rest of the file (comments, order, other keys) alone.
+     * config_changed returns true once after the file changed on disk (a hand edit) and has
+     * re-read it: poll it from forge_onUpdate for live settings. A value you set but did not
+     * save is lost then. config_string's pointer is valid until the next config_set /
+     * config_changed / config_string call on that handle from any thread: copy it. */
+    ForgeConfig* (*config_open)(const char* name);
+    int32_t (*config_int)(ForgeConfig* cfg, const char* section, const char* key, int32_t def);
+    float (*config_float)(ForgeConfig* cfg, const char* section, const char* key, float def);
+    bool (*config_bool)(ForgeConfig* cfg, const char* section, const char* key, bool def);
+    const char* (*config_string)(ForgeConfig* cfg, const char* section, const char* key,
+                                 const char* def);
+    bool (*config_set)(ForgeConfig* cfg, const char* section, const char* key, const char* value);
+    bool (*config_save)(ForgeConfig* cfg);
+    bool (*config_changed)(ForgeConfig* cfg);
 } ForgeApi;
 
 extern const ForgeApi* forge_api;

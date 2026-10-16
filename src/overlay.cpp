@@ -33,6 +33,7 @@ constexpr uint32_t kRetireFrames = 8; // presents before a replaced framebuffer 
 std::atomic<bool> g_menu_open{false};
 std::atomic<bool> g_want_keyboard{false};
 std::atomic<bool> g_want_mouse{false};
+std::atomic<uint64_t> g_screen{0}; // last swapchain size: width << 32 | height
 int g_menu_key{kDefaultMenuKey};
 float g_font_size{16.0f};
 
@@ -484,12 +485,40 @@ bool SetupVulkan(const ModHostPresent* p) {
 
 // --- the menu (Forge's) ---
 
+/// Header tiers of the menu. Biggest: the loader's own sections (this function: larger text and
+/// a taller bar). Medium: a plugin's main dropdown, an ordinary ImGui::CollapsingHeader inside
+/// "Plugin UI" (normal size, tinted bar: see DrawPluginUi). Small: everything below that, the
+/// plugin's own TreeNodes (text only, no bar).
+bool LoaderHeader(const char* label, ImGuiTreeNodeFlags flags = 0) {
+    ImGui::PushFont(nullptr, g_font_size * 1.08f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {6.0f, 7.5f});
+    const bool open = ImGui::CollapsingHeader(label, flags);
+    ImGui::PopStyleVar();
+    ImGui::PopFont();
+    return open;
+}
+
+/// The contents of "Plugin UI": medium header bars for the plugins' CollapsingHeaders.
+void DrawPluginUi() {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const ImVec4 bar{0.145f, 0.155f, 0.290f, 1.0f}; // between the frame colour and the accent
+    ImGui::PushStyleColor(ImGuiCol_Header, bar);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, st.Colors[ImGuiCol_HeaderHovered]);
+    ForEachPluginUi([](size_t, const PluginUi& ui) {
+        if (ui.on_imgui_render) {
+            CallbackScope scope{ui.state, 0, "imgui"};
+            ui.on_imgui_render();
+        }
+    });
+    ImGui::PopStyleColor(2);
+}
+
 void DrawMenu() {
     bool open = g_menu_open.load();
     if (open) {
         ImGui::SetNextWindowSize({460.0f, 360.0f}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("forge", &open)) {
-            if (ImGui::CollapsingHeader("About Forge")) {
+            if (LoaderHeader("About Forge")) {
                 ImGui::Text("Forge PC %d.%d.%d", FORGE_PC_VERSION_MAJOR, FORGE_PC_VERSION_MINOR,
                             FORGE_PC_VERSION_PATCH);
                 ImGui::SeparatorText("Forge (Switch) by");
@@ -500,7 +529,46 @@ void DrawMenu() {
                 ImGui::BulletText("Roboto font (Apache License 2.0)");
                 ImGui::TextDisabled("Licenses: Forge/licenses/");
             }
-            if (ImGui::CollapsingHeader("Loaded Plugins", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (LoaderHeader("Mods", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const auto mods = ListMods();
+                if (mods.empty()) {
+                    ImGui::TextDisabled("none (mods/<title id>/<mod>/)");
+                }
+                for (const auto& m : mods) {
+                    ImGui::PushID(m.name.c_str());
+                    bool on = m.enabled;
+                    if (ImGui::Checkbox(m.name.c_str(), &on)) {
+                        SetModEnabled(m.name, on);
+                    }
+                    ImGui::SameLine();
+                    if (m.busy) {
+                        ImGui::TextDisabled("switching...");
+                    } else if (m.plugins == 0) {
+                        ImGui::TextDisabled(m.enabled ? "game files only" : "off");
+                    } else if (!m.enabled) {
+                        ImGui::TextDisabled("off (%zu plugin%s)", m.plugins,
+                                            m.plugins == 1 ? "" : "s");
+                    } else {
+                        ImGui::TextDisabled("%zu of %zu plugin%s loaded", m.loaded, m.plugins,
+                                            m.plugins == 1 ? "" : "s");
+                    }
+                    if (m.has_romfs) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("| game files (romfs): restart required");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Game files the game already loaded stay as they "
+                                              "are. Forge only switches the mod's plugins; "
+                                              "restart the game for the files.");
+                        }
+                    }
+                    if (!m.note.empty()) {
+                        ImGui::TextColored({1.0f, 0.55f, 0.35f, 1.0f}, "   %s", m.note.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TextDisabled("Switches are saved in forge.ini ([mods]).");
+            }
+            if (LoaderHeader("Loaded Plugins", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (PluginCount() == 0) {
                     ImGui::TextDisabled("none (mods/<title id>/<mod>/plugins/*.dll)");
                 }
@@ -517,16 +585,25 @@ void DrawMenu() {
                 for (const size_t i : reload) {
                     RequestPluginReload(i);
                 }
+                if (ImGui::Button("Reset scripts")) {
+                    RequestResetScripts();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Looks for plugin files again and loads every plugin of an "
+                                      "enabled mod that is not loaded: new mods dropped in while "
+                                      "the game runs, plugins that were off, plugins whose hot "
+                                      "reload broke. Loaded plugins are left alone.");
+                }
+                if (const std::string msg = ResetScriptsMessage(); !msg.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", msg.c_str());
+                }
                 ImGui::TextDisabled(HotReloadOn() ? "hot reload on: rebuilt plugins reload by "
                                                     "themselves"
                                                   : "hot reload off ([plugins] hot_reload)");
             }
-            if (ImGui::CollapsingHeader("Plugin UI")) {
-                ForEachPluginUi([](size_t, const PluginUi& ui) {
-                    if (ui.on_imgui_render) {
-                        ui.on_imgui_render();
-                    }
-                });
+            if (LoaderHeader("Plugin UI")) {
+                DrawPluginUi();
             }
         }
         ImGui::End();
@@ -537,6 +614,7 @@ void DrawMenu() {
     }
     ForEachPluginUi([](size_t, const PluginUi& ui) {
         if (ui.on_imgui_free_render) {
+            CallbackScope scope{ui.state, 0, "imgui"};
             ui.on_imgui_free_render();
         }
     });
@@ -550,9 +628,38 @@ void InitPluginImGui() {
     ForEachPluginUi([&](size_t, const PluginUi& ui) {
         if (g_plugin_imgui_inited.insert(ui.generation).second) {
             if (ui.on_imgui_init) {
+                CallbackScope scope{ui.state, 0, "imgui"};
                 ui.on_imgui_init(ImGui::GetCurrentContext(), reinterpret_cast<void*>(alloc),
                                  reinterpret_cast<void*>(free_fn), user);
             }
+        }
+    });
+}
+
+/// Raw present callbacks of plugins (0.6); they leave the image in TRANSFER_DST for the overlay.
+void PluginPresent(const ModHostPresent* p) {
+    ForgePresent fp{};
+    fp.size = sizeof(ForgePresent);
+    fp.vk_api_version = p->vk_api_version;
+    fp.vk_instance = p->vk_instance;
+    fp.vk_get_instance_proc = p->vk_get_instance_proc;
+    fp.vk_physical_device = p->vk_physical_device;
+    fp.vk_device = p->vk_device;
+    fp.vk_queue = p->vk_queue;
+    fp.vk_queue_family = p->vk_queue_family;
+    fp.vk_command_buffer = p->vk_command_buffer;
+    fp.vk_image = p->vk_image;
+    fp.vk_format = p->vk_format;
+    fp.width = p->width;
+    fp.height = p->height;
+    fp.image_count = p->image_count;
+    fp.image_index = p->image_index;
+    fp.lock_queue = p->lock_queue;
+    fp.unlock_queue = p->unlock_queue;
+    ForEachPluginUi([&](size_t, const PluginUi& ui) {
+        if (ui.on_present) {
+            CallbackScope scope{ui.state, 0, "present"};
+            ui.on_present(&fp);
         }
     });
 }
@@ -600,8 +707,30 @@ bool OnInput(const ModHostInput* e) {
     return !release && e->type != MODHOST_INPUT_FOCUS;
 }
 
+/// Swapchain size of the last present (plugins: ForgeApi::screen_size).
+bool ScreenSize(uint32_t* width, uint32_t* height) {
+    const uint64_t s = g_screen.load(std::memory_order_relaxed);
+    if (!s) {
+        return false;
+    }
+    if (width) {
+        *width = static_cast<uint32_t>(s >> 32);
+    }
+    if (height) {
+        *height = static_cast<uint32_t>(s);
+    }
+    return true;
+}
+
 bool OnPresent(const ModHostPresent* p) {
-    if (g_failed || !MODHOST_HAS(ModHostPresent, p, unlock_queue)) {
+    if (p->width && p->height) {
+        g_screen = (static_cast<uint64_t>(p->width) << 32) | p->height;
+    }
+    if (!MODHOST_HAS(ModHostPresent, p, unlock_queue)) {
+        return false;
+    }
+    PluginPresent(p);
+    if (g_failed) {
         return false;
     }
     ++g_frame;

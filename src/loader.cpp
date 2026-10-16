@@ -26,24 +26,6 @@
 #include "forge_internal.h"
 #include "platform.h"
 
-/// A loaded plugin's lifetime guard: callbacks into it count themselves in `inflight`; once
-/// `dead` is set (hot reload) no new callback starts, and the DLL is freed when the count is
-/// back to 0. Never freed itself (hooks and pending frames may still point at it).
-struct ForgePluginState {
-    std::atomic<int> inflight{0};
-    std::atomic<bool> dead{false};
-};
-
-/// The C API's opaque hook handle.
-struct ForgeHook {
-    uint32_t target;
-    ForgeHookPre pre;
-    ForgeHookPost post;
-    void* user;
-    std::atomic<bool> enabled{true};
-    ForgePluginState* owner{}; // the plugin that made it (nullptr = Forge itself)
-};
-
 namespace {
 /// Enters a plugin callback; false if the plugin is being unloaded (then don't call it).
 bool Enter(ForgePluginState* s) {
@@ -89,7 +71,23 @@ std::string g_mods_dir;
 std::atomic<int> g_level{FORGE_LOG_INFO};
 std::mutex g_log_lock;
 std::ofstream g_log_file;
-std::map<std::string, std::map<std::string, std::string>> g_config; // forge.ini
+std::mutex g_config_lock;
+IniMap g_config; // forge.ini
+
+// Per game thread: a call_original in progress (no hook / override / trace fires inside; belt
+// and braces: the exe's guest calls never dispatch hooks anyway), the guest thread key of the
+// running dispatch, and the override being run (so call_original can reach the next one down).
+thread_local int t_bypass{0};
+thread_local uint32_t t_thread_key{0};
+struct OverrideChain {
+    u32 target{};
+    ForgeCpu entry{};                   // state at entry (copied for the next override down)
+    std::array<ForgeHook*, 8> list{};   // outermost first
+    size_t count{};
+    size_t index{};                     // the override running now
+};
+thread_local OverrideChain* t_chain{nullptr};
+std::atomic<u32> g_frame_count{0};
 
 struct Module {
     std::string name;
@@ -120,6 +118,7 @@ int g_dti_layout{-1}; // offset of the name field: 4 (vptr first) or 0; -1 = not
 
 struct Plugin {
     std::string file;             // mod folder / dll name, for logs
+    std::string mod;              // mod folder name (the unit that is switched on / off)
     std::filesystem::path source; // <mod>/plugins/<name>.dll (never loaded itself: stays writable)
     std::filesystem::path live;   // the copy actually loaded: <name>.dll.<n>.live, same folder
     ForgePluginState* state{};
@@ -157,35 +156,128 @@ struct Unloading {
     Plugin plugin;
     size_t index{};
     u32 frames{0};
+    bool reload{true}; // false: a mod switched off, unload and leave it unloaded
 };
 std::vector<Unloading> g_unloading; // game thread only
+
+// mods (folders): the menu lists all of them, switched off ones too
+struct ModEntry {
+    std::string name;
+    std::filesystem::path dir;
+    std::vector<std::filesystem::path> files; // plugin files
+    bool has_romfs{};
+    std::string note;
+};
+std::mutex g_mods_lock;
+std::vector<ModEntry> g_mod_list;
+std::map<std::string, std::string> g_mod_notes; // mod -> note for the menu (under g_mods_lock)
+std::vector<std::pair<std::string, bool>> g_mod_requests; // under g_reload_lock: (mod, on)
+std::atomic<bool> g_reset_req{false};
+std::string g_reset_msg; // result of the last "Reset scripts" (under g_mods_lock)
 std::atomic<bool> g_watch_stop{false};
 std::thread g_watcher;
 
 // --- config + logging -------------------------------------------------------------------------
 
-void LoadConfig() {
-    std::ifstream in(PathU8(g_loader_dir + "/forge.ini"));
+std::string Trim(std::string s) {
+    const auto b = s.find_first_not_of(" \t\r");
+    const auto e = s.find_last_not_of(" \t\r");
+    return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
+}
+
+IniMap ParseIni(const std::filesystem::path& path) {
+    IniMap map;
+    std::ifstream in(path);
     std::string line, section;
     while (std::getline(in, line)) {
-        const auto trim = [](std::string s) {
-            const auto b = s.find_first_not_of(" \t\r");
-            const auto e = s.find_last_not_of(" \t\r");
-            return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
-        };
-        line = trim(line);
+        line = Trim(line);
         if (line.empty() || line[0] == ';' || line[0] == '#') {
             continue;
         }
         if (line.front() == '[' && line.back() == ']') {
-            section = trim(line.substr(1, line.size() - 2));
+            section = Trim(line.substr(1, line.size() - 2));
             continue;
         }
         const auto eq = line.find('=');
         if (eq != std::string::npos) {
-            g_config[section][trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
+            map[section][Trim(line.substr(0, eq))] = Trim(line.substr(eq + 1));
         }
     }
+    return map;
+}
+
+void LoadConfig() {
+    IniMap map = ParseIni(PathU8(g_loader_dir + "/forge.ini"));
+    std::scoped_lock lk{g_config_lock};
+    g_config = std::move(map);
+}
+
+/// Rewrites one `key = value` of forge.ini in place (or adds it, and the section if needed):
+/// comments and every other line stay as they are. Written to a temp file and renamed over.
+bool WriteIniValue(const std::filesystem::path& path, const std::string& section,
+                   const std::string& key, const std::string& value) {
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(line);
+        }
+    }
+    const std::string entry = key + " = " + value;
+    bool in_section = false, section_found = false, done = false;
+    size_t insert_at = lines.size();
+    for (size_t i = 0; i < lines.size() && !done; ++i) {
+        const std::string t = Trim(lines[i]);
+        if (t.size() >= 2 && t.front() == '[' && t.back() == ']') {
+            if (in_section) {
+                break; // next section: the key wasn't there
+            }
+            in_section = Trim(t.substr(1, t.size() - 2)) == section;
+            section_found |= in_section;
+            insert_at = i + 1;
+            continue;
+        }
+        if (!in_section) {
+            continue;
+        }
+        if (!t.empty() && t[0] != ';' && t[0] != '#') {
+            insert_at = i + 1; // after the last real line of the section
+            const auto eq = t.find('=');
+            if (eq != std::string::npos && Trim(t.substr(0, eq)) == key) {
+                lines[i] = entry;
+                done = true;
+            }
+        }
+    }
+    if (!done) {
+        if (section_found) {
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_at), entry);
+        } else {
+            if (!lines.empty() && !lines.back().empty()) {
+                lines.emplace_back();
+            }
+            lines.push_back("[" + section + "]");
+            lines.push_back(entry);
+        }
+    }
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        for (const auto& l : lines) {
+            out << l << '\n';
+        }
+        if (!out.good()) {
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
 }
 
 void WriteLog(ForgeLogLevel level, const char* who, const char* message) {
@@ -471,8 +563,22 @@ u32 PatternFind(const char* module, const char* pattern, u32 from) {
 
 // --- hooks ------------------------------------------------------------------------------------
 
-ForgeHook* HookCreate(u32 target, ForgeHookPre pre, ForgeHookPost post, void* user) {
-    if (!pre && !post) {
+/// The plugin whose code is at `addr` (the caller of an API function): the owner of the hooks
+/// it makes, dropped on hot reload. nullptr = not a plugin (Forge itself).
+ForgePluginState* PluginOfCode(const void* addr) {
+    if (const void* mod = plat::ModuleOf(addr)) {
+        std::scoped_lock lk{g_owner_lock};
+        const auto it = g_owners.find(mod);
+        if (it != g_owners.end()) {
+            return it->second;
+        }
+    }
+    return nullptr;
+}
+
+ForgeHook* AddHook(u32 target, ForgeHookPre pre, ForgeHookPost post, ForgeOverride override_fn,
+                   void* user, ForgePluginState* owner, bool front) {
+    if (!pre && !post && !override_fn) {
         Log(FORGE_LOG_ERROR, "hook at %#x: no callback", target);
         return nullptr;
     }
@@ -481,27 +587,92 @@ ForgeHook* HookCreate(u32 target, ForgeHookPre pre, ForgeHookPost post, void* us
         return nullptr;
     }
     auto* hook = new ForgeHook{target, pre, post, user};
-    {
-        // the caller's module = the plugin that owns the hook (dropped on hot reload)
-        if (const void* mod = plat::ModuleOf(FORGE_RETURN_ADDRESS())) {
-            std::scoped_lock lk{g_owner_lock};
-            const auto it = g_owners.find(mod);
-            hook->owner = it == g_owners.end() ? nullptr : it->second;
-        }
-    }
+    hook->owner = owner;
+    hook->override_fn = override_fn;
     {
         std::unique_lock lk{g_hooks_lock};
-        g_hooks[target].push_back(hook);
+        auto& list = g_hooks[target];
+        if (front) {
+            list.insert(list.begin(), hook);
+        } else {
+            list.push_back(hook);
+        }
     }
     g_host->mark(target);
-    Log(FORGE_LOG_DEBUG, "hook at %#x (main+%#x)", target, target - g_main);
+    Log(FORGE_LOG_DEBUG, "%s at %#x (main+%#x)", override_fn ? "override" : "hook", target,
+        target - g_main);
     return hook;
+}
+
+ForgeHook* HookCreate(u32 target, ForgeHookPre pre, ForgeHookPost post, void* user) {
+    return AddHook(target, pre, post, nullptr, user, PluginOfCode(FORGE_RETURN_ADDRESS()), false);
+}
+
+ForgeHook* HookOverride(u32 target, ForgeOverride fn, void* user) {
+    return AddHook(target, nullptr, nullptr, fn, user, PluginOfCode(FORGE_RETURN_ADDRESS()),
+                   false);
 }
 
 void HookEnable(ForgeHook* hook, bool enabled) {
     if (hook) {
         hook->enabled.store(enabled);
     }
+}
+
+/// Runs the first usable override of `chain` from position `start` on (enabled, its plugin not
+/// being unloaded) on `cpu`. False if there is none: the original function is next.
+bool RunOverrideFrom(OverrideChain& chain, size_t start, ForgeCpu* cpu) {
+    for (size_t i = start; i < chain.count; ++i) {
+        ForgeHook* h = chain.list[i];
+        if (!h->enabled.load(std::memory_order_relaxed) || !Enter(h->owner)) {
+            continue;
+        }
+        const size_t saved = chain.index;
+        chain.index = i;
+        {
+            CallbackScope scope{h->owner, h->target, "override"};
+            h->override_fn(cpu, h->user);
+        }
+        chain.index = saved;
+        Leave(h->owner);
+        return true;
+    }
+    return false;
+}
+
+bool CallOriginal(u32 function, const u32* args, u32 count, const float* fargs, u32 fcount,
+                  ForgeCallResult* out) {
+    if (OverrideChain* chain = t_chain; chain && chain->target == function) {
+        // an override calls the function it replaced: the override below it, if any
+        ForgeCpu cpu = chain->entry;
+        for (u32 i = 0; i < 4; ++i) {
+            cpu.r[i] = i < count ? args[i] : 0;
+        }
+        for (u32 i = 0; i < 16; ++i) {
+            cpu.vfp.s[i] = i < fcount && fargs ? fargs[i] : 0.0f;
+        }
+        const size_t from = chain->index == static_cast<size_t>(-1) ? 0 : chain->index + 1;
+        if (RunOverrideFrom(*chain, from, &cpu)) {
+            if (count > 4) {
+                static std::atomic<int> warned{0};
+                if (warned.fetch_add(1) < 3) {
+                    Log(FORGE_LOG_WARN, "call_original(%#x): stack arguments don't reach the "
+                                        "next override down", function);
+                }
+            }
+            if (out) {
+                out->r0 = cpu.r[0];
+                out->r1 = cpu.r[1];
+                out->s0 = cpu.vfp.s[0];
+                out->d0 = cpu.vfp.d[0];
+            }
+            return true;
+        }
+    }
+    ++t_bypass;
+    const bool ok = Call(function, args, count, fargs, fcount, out);
+    --t_bypass;
+    return ok;
 }
 
 ForgeLogLevel LogGetLevel() {
@@ -534,6 +705,32 @@ void MemFree(uint32_t addr) {
     }
 }
 
+// config files of plugins (src/config.cpp); the caller's module says whose mod folder it is
+ForgeConfig* ConfigOpenApi(const char* name) {
+    return ConfigOpen(PluginOfCode(FORGE_RETURN_ADDRESS()), name);
+}
+int32_t ConfigIntApi(ForgeConfig* c, const char* sec, const char* key, int32_t def) {
+    return ConfigGetInt(c, sec, key, def);
+}
+float ConfigFloatApi(ForgeConfig* c, const char* sec, const char* key, float def) {
+    return ConfigGetFloat(c, sec, key, def);
+}
+bool ConfigBoolApi(ForgeConfig* c, const char* sec, const char* key, bool def) {
+    return ConfigGetBool(c, sec, key, def);
+}
+const char* ConfigStringApi(ForgeConfig* c, const char* sec, const char* key, const char* def) {
+    return ConfigGetString(c, sec, key, def);
+}
+bool ConfigSetApi(ForgeConfig* c, const char* sec, const char* key, const char* value) {
+    return ConfigSetValue(c, sec, key, value);
+}
+bool ConfigSaveApi(ForgeConfig* c) {
+    return ConfigSave(c);
+}
+bool ConfigChangedApi(ForgeConfig* c) {
+    return ConfigPoll(c);
+}
+
 const ForgeApi kApi = {
     .version = {FORGE_PC_VERSION_MAJOR, FORGE_PC_VERSION_MINOR, FORGE_PC_VERSION_PATCH},
     .size = static_cast<uint32_t>(sizeof(ForgeApi)),
@@ -560,6 +757,17 @@ const ForgeApi kApi = {
     .menu_isOpen = MenuOpen,
     .mem_alloc = MemAlloc,
     .mem_free = MemFree,
+    .screen_size = ScreenSize,
+    .call_original = CallOriginal,
+    .hook_override = HookOverride,
+    .config_open = ConfigOpenApi,
+    .config_int = ConfigIntApi,
+    .config_float = ConfigFloatApi,
+    .config_bool = ConfigBoolApi,
+    .config_string = ConfigStringApi,
+    .config_set = ConfigSetApi,
+    .config_save = ConfigSaveApi,
+    .config_changed = ConfigChangedApi,
 };
 
 // --- plugins ----------------------------------------------------------------------------------
@@ -610,6 +818,8 @@ void FreePlugin(Plugin& p) {
             std::scoped_lock lk{g_owner_lock};
             g_owners.erase(p.base);
         }
+        CrashPluginUnloaded(p.base);
+        ConfigDropOwner(p.state);
         plat::LibClose(p.handle);
         p.handle = nullptr;
         p.base = nullptr;
@@ -623,6 +833,7 @@ void FreePlugin(Plugin& p) {
 /// Loads one plugin from a copy of `path` (the dll itself stays writable for builds) and calls
 /// forge_setApi / forge_onLoad. False if it isn't loadable or wants another Forge version.
 bool LoadOne(const std::filesystem::path& path, Plugin& p) {
+    p.mod = Utf8(path.parent_path().parent_path().filename());
     p.file = Utf8(path.parent_path().parent_path().filename() / path.filename());
     p.source = path;
     // the copy sits in the same folder: the plugin's own folder (GetModuleFileName / dladdr) and the
@@ -645,13 +856,22 @@ bool LoadOne(const std::filesystem::path& path, Plugin& p) {
         return false;
     }
     p.state = new ForgePluginState{};
+    p.state->mod = p.mod;
+    p.state->file = p.file;
+    p.state->live = Utf8(p.live.filename());
+    p.state->name = p.file;
     const auto set_api = Symbol<void (*)(const ForgeApi*)>(p, "forge_setApi");
     const auto on_load = Symbol<void (*)(ForgePluginInfo*)>(p, "forge_onLoad");
     p.base = on_load ? plat::ModuleOf(reinterpret_cast<const void*>(on_load)) : nullptr;
     if (p.base) {
-        std::scoped_lock lk{g_owner_lock};
-        g_owners[p.base] = p.state;
+        {
+            std::scoped_lock lk{g_owner_lock};
+            g_owners[p.base] = p.state;
+        }
+        CrashPluginLoaded(p.base, p.state);
     }
+    // logs and crash reports name the dll behind the numbered live copy
+    Log(FORGE_LOG_INFO, "%s is loaded as %s", p.file.c_str(), p.state->live.c_str());
     if (!set_api || !on_load) {
         Log(FORGE_LOG_WARN, "%s: not a Forge PC plugin (no forge_setApi/forge_onLoad)",
             p.file.c_str());
@@ -665,10 +885,18 @@ bool LoadOne(const std::filesystem::path& path, Plugin& p) {
     p.ui.on_imgui_init = Symbol<void (*)(void*, void*, void*, void*)>(p, "forge_onImGuiInit");
     p.ui.on_imgui_render = Symbol<void (*)()>(p, "forge_onImGuiRender");
     p.ui.on_imgui_free_render = Symbol<void (*)()>(p, "forge_onImGuiFreeRender");
+    p.ui.on_present = Symbol<void (*)(const ForgePresent*)>(p, "forge_onPresent");
     p.ui.generation = ++g_ui_generation;
+    p.ui.state = p.state;
     set_api(&kApi);
-    on_load(&p.info);
+    {
+        CallbackScope scope{p.state, 0, "onLoad"};
+        on_load(&p.info);
+    }
     p.info.name[sizeof(p.info.name) - 1] = '\0';
+    if (p.info.name[0]) {
+        p.state->name = p.info.name;
+    }
     const ForgeVersion& want = p.info.required_ver;
     if (want.major != FORGE_PC_VERSION_MAJOR || want.minor > FORGE_PC_VERSION_MINOR) {
         Log(FORGE_LOG_ERROR, "%s requires Forge PC %u.%u.*, this is %u.%u.%u: not loaded",
@@ -692,7 +920,54 @@ void StampOf(const std::filesystem::path& path, std::filesystem::file_time_type&
     }
 }
 
+bool IsOff(const std::string& value) {
+    return value == "off" || value == "false" || value == "0" || value == "disabled";
+}
+
+/// A mod is on unless forge.ini [mods] says <name> = off.
+bool ModEnabled(const std::string& mod) {
+    return !IsOff(ConfigValue("mods", mod.c_str()));
+}
+
+std::string ModOf(const std::filesystem::path& plugin_file) {
+    return Utf8(plugin_file.parent_path().parent_path().filename());
+}
+
+/// Lists the mod folders (with plugins or game files) for the menu.
+void ScanMods() {
+    std::vector<ModEntry> mods;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(PathU8(g_mods_dir), ec)) {
+        if (!e.is_directory(ec)) {
+            continue;
+        }
+        ModEntry m;
+        m.name = Utf8(e.path().filename());
+        m.dir = e.path();
+        for (const auto& f : std::filesystem::directory_iterator(e.path() / "plugins", ec)) {
+            if (f.is_regular_file(ec) && f.path().extension() == plat::kLibExt) {
+                m.files.push_back(f.path());
+            }
+        }
+        std::sort(m.files.begin(), m.files.end());
+        m.has_romfs = std::filesystem::is_directory(e.path() / "romfs", ec);
+        if (!m.files.empty() || m.has_romfs) {
+            mods.push_back(std::move(m));
+        }
+    }
+    std::sort(mods.begin(), mods.end(),
+              [](const ModEntry& a, const ModEntry& b) { return a.dir < b.dir; });
+    std::scoped_lock lk{g_mods_lock};
+    for (auto& m : mods) {
+        if (const auto n = g_mod_notes.find(m.name); n != g_mod_notes.end()) {
+            m.note = n->second;
+        }
+    }
+    g_mod_list = std::move(mods);
+}
+
 void LoadPlugins() {
+    ScanMods();
     const auto files = FindPluginFiles();
     for (const auto& path : files) {
         RemoveLiveCopies(path.parent_path());
@@ -705,6 +980,11 @@ void LoadPlugins() {
             w.seen_size = w.size;
             std::scoped_lock lk{g_reload_lock};
             g_watch.push_back(w);
+        }
+        if (!ModEnabled(ModOf(path))) {
+            Log(FORGE_LOG_INFO, "%s: mod switched off in forge.ini [mods], not loaded",
+                Utf8(path.parent_path().parent_path().filename() / path.filename()).c_str());
+            continue;
         }
         Plugin p;
         if (!LoadOne(path, p)) {
@@ -760,40 +1040,171 @@ void WatchPlugins() {
     }
 }
 
+bool UnloadingHas(const std::filesystem::path& source) {
+    return std::any_of(g_unloading.begin(), g_unloading.end(),
+                       [&](const Unloading& u) { return u.plugin.source == source; });
+}
+
+/// Takes a loaded plugin out of the list for unloading: no more menu / update calls, its hooks
+/// are dropped and it is marked dead (callbacks in flight finish, no new ones start).
+bool BeginUnload(const std::filesystem::path& source, bool reload) {
+    Unloading u{};
+    u.reload = reload;
+    {
+        std::scoped_lock lk{g_plugins_lock};
+        const auto it = std::find_if(g_plugins.begin(), g_plugins.end(),
+                                     [&](const Plugin& p) { return p.source == source; });
+        if (it == g_plugins.end()) {
+            return false;
+        }
+        u.index = static_cast<size_t>(it - g_plugins.begin());
+        u.plugin = std::move(*it);
+        g_plugins.erase(it);
+    }
+    u.plugin.state->dead = true;
+    {
+        std::unique_lock lk{g_hooks_lock};
+        for (auto& [pc, list] : g_hooks) {
+            std::erase_if(list, [&](ForgeHook* h) { return h->owner == u.plugin.state; });
+        }
+    }
+    g_unloading.push_back(std::move(u));
+    return true;
+}
+
+/// Mod switches from the menu (and reload requests): off = unload the mod's plugins and leave
+/// them unloaded, on = load them (a plugin already being unloaded is kept instead).
+void ProcessModRequests(const std::vector<std::pair<std::string, bool>>& mod_requests) {
+    for (const auto& [mod, on] : mod_requests) {
+        std::vector<std::filesystem::path> files;
+        {
+            std::scoped_lock lk{g_mods_lock};
+            for (const auto& m : g_mod_list) {
+                if (m.name == mod) {
+                    files = m.files;
+                }
+            }
+        }
+        for (const auto& source : files) {
+            if (on) {
+                const auto pending = std::find_if(
+                    g_unloading.begin(), g_unloading.end(),
+                    [&](const Unloading& u) { return u.plugin.source == source; });
+                if (pending != g_unloading.end()) {
+                    pending->reload = true; // switched off and on again before it was gone
+                    continue;
+                }
+                bool loaded = false;
+                {
+                    std::scoped_lock lk{g_plugins_lock};
+                    loaded = std::any_of(g_plugins.begin(), g_plugins.end(),
+                                         [&](const Plugin& p) { return p.source == source; });
+                }
+                if (!loaded) {
+                    Unloading u{};
+                    u.plugin.source = source;
+                    {
+                        std::scoped_lock lk{g_plugins_lock};
+                        u.index = g_plugins.size();
+                    }
+                    g_unloading.push_back(std::move(u)); // loads once there is nothing to unload
+                }
+            } else {
+                const auto pending = std::find_if(
+                    g_unloading.begin(), g_unloading.end(),
+                    [&](const Unloading& u) { return u.plugin.source == source; });
+                if (pending != g_unloading.end()) {
+                    pending->reload = false;
+                } else {
+                    BeginUnload(source, false);
+                }
+            }
+        }
+        Log(FORGE_LOG_INFO, "mod %s switched %s", mod.c_str(), on ? "on" : "off");
+    }
+}
+
+/// "Reset scripts" (menu): looks for plugin files again and loads every one of an enabled mod
+/// that is not loaded: new files, plugins that were off, plugins whose reload failed. Loaded
+/// plugins are left alone (the Reload button restarts one). Game thread.
+void ResetScripts() {
+    ScanMods();
+    size_t fresh = 0, retried = 0;
+    for (const auto& path : FindPluginFiles()) {
+        bool known = false;
+        {
+            std::scoped_lock lk{g_reload_lock};
+            known = std::any_of(g_watch.begin(), g_watch.end(),
+                                [&](const Watch& w) { return w.source == path; });
+            if (!known) { // new file: watch it for hot reload too
+                Watch w{path};
+                StampOf(path, w.time, w.size);
+                w.seen_time = w.time;
+                w.seen_size = w.size;
+                g_watch.push_back(w);
+            }
+        }
+        if (!ModEnabled(ModOf(path)) || UnloadingHas(path)) {
+            continue;
+        }
+        bool loaded = false;
+        {
+            std::scoped_lock lk{g_plugins_lock};
+            loaded = std::any_of(g_plugins.begin(), g_plugins.end(),
+                                 [&](const Plugin& p) { return p.source == path; });
+        }
+        if (loaded) {
+            continue;
+        }
+        Unloading u{};
+        u.plugin.source = path;
+        {
+            std::scoped_lock lk{g_plugins_lock};
+            u.index = g_plugins.size();
+        }
+        g_unloading.push_back(std::move(u)); // loaded by the loop in ProcessReloads
+        known ? ++retried : ++fresh;
+        Log(FORGE_LOG_INFO, "reset scripts: loading %s (%s)", Utf8(path).c_str(),
+            known ? "was not loaded" : "new");
+    }
+    char msg[128];
+    if (fresh + retried == 0) {
+        std::snprintf(msg, sizeof msg, "Nothing to load: every plugin of an enabled mod is loaded.");
+    } else {
+        std::snprintf(msg, sizeof msg, "Loading %zu plugin%s (%zu new, %zu retried).",
+                      fresh + retried, fresh + retried == 1 ? "" : "s", fresh, retried);
+    }
+    Log(FORGE_LOG_INFO, "reset scripts: %s", msg);
+    std::scoped_lock lk{g_mods_lock};
+    g_reset_msg = msg;
+}
+
 void ProcessReloads() {
+    if (g_reset_req.exchange(false)) {
+        ResetScripts();
+    }
     std::vector<std::filesystem::path> requests;
+    std::vector<std::pair<std::string, bool>> mod_requests;
     {
         std::scoped_lock lk{g_reload_lock};
         requests.swap(g_reload_requests);
+        mod_requests.swap(g_mod_requests);
     }
+    ProcessModRequests(mod_requests);
     for (const auto& source : requests) {
-        Unloading u{};
-        bool found = false;
-        {
-            std::scoped_lock lk{g_plugins_lock};
-            for (size_t i = 0; i < g_plugins.size(); ++i) {
-                if (g_plugins[i].source == source) {
-                    u.plugin = std::move(g_plugins[i]);
-                    u.index = i;
-                    g_plugins.erase(g_plugins.begin() + static_cast<std::ptrdiff_t>(i));
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                u.index = g_plugins.size(); // not loaded (failed before): try it now
-            }
+        if (!ModEnabled(ModOf(source)) || UnloadingHas(source)) {
+            continue; // a mod that is off stays unloaded; already on its way
         }
-        if (found) {
-            u.plugin.state->dead = true;
-            std::unique_lock lk{g_hooks_lock};
-            for (auto& [pc, list] : g_hooks) {
-                std::erase_if(list, [&](ForgeHook* h) { return h->owner == u.plugin.state; });
-            }
-        } else {
+        if (!BeginUnload(source, true)) {
+            // not loaded (failed before): try it now
+            Unloading u{};
             u.plugin.source = source;
+            {
+                std::scoped_lock lk{g_plugins_lock};
+                u.index = g_plugins.size();
+            }
+            g_unloading.push_back(std::move(u));
         }
-        g_unloading.push_back(std::move(u));
     }
     for (auto it = g_unloading.begin(); it != g_unloading.end();) {
         Plugin& old = it->plugin;
@@ -807,9 +1218,15 @@ void ProcessReloads() {
         }
         if (old.handle) {
             if (old.on_unload) {
+                CallbackScope scope{old.state, 0, "unload"};
                 old.on_unload();
             }
             FreePlugin(old);
+        }
+        if (!it->reload) {
+            Log(FORGE_LOG_INFO, "unloaded %s (mod switched off)", old.file.c_str());
+            it = g_unloading.erase(it);
+            continue;
         }
         Plugin p;
         if (LoadOne(it->plugin.source, p)) {
@@ -823,6 +1240,7 @@ void ProcessReloads() {
                                  std::move(p));
             }
             if (init && Enter(state)) {
+                CallbackScope scope{state, 0, "init"};
                 init();
                 Leave(state);
             }
@@ -858,6 +1276,7 @@ ForgeHookAction OnAppRun(ForgeCpu*, void*) {
     Log(FORGE_LOG_INFO, "%u singletons resolved; loading plugins from %s/*/plugins",
         SingletonAll(nullptr, 0), g_mods_dir.c_str());
     LoadPlugins();
+    CrashInit(); // plugins may have set exception filters of their own: ours goes back on top
     std::vector<std::pair<void (*)(), ForgePluginState*>> inits;
     {
         std::scoped_lock lk{g_plugins_lock};
@@ -869,7 +1288,10 @@ ForgeHookAction OnAppRun(ForgeCpu*, void*) {
     }
     for (const auto& [init, state] : inits) {
         if (Enter(state)) {
-            init();
+            {
+                CallbackScope scope{state, 0, "init"};
+                init();
+            }
             Leave(state);
         }
     }
@@ -884,6 +1306,8 @@ ForgeHookAction OnAppRun(ForgeCpu*, void*) {
 void OnUpdateReturn(ForgeCpu*, const u32 args[4], void*) {
     float dt = 0.0f;
     MemRead(args[0] + kUpdateDt, &dt, 4);
+    g_frame_count.fetch_add(1, std::memory_order_relaxed);
+    TraceTick();
     ProcessReloads();
     std::vector<std::pair<void (*)(float), ForgePluginState*>> updates;
     {
@@ -896,7 +1320,10 @@ void OnUpdateReturn(ForgeCpu*, const u32 args[4], void*) {
     }
     for (const auto& [update, state] : updates) {
         if (Enter(state)) {
-            update(dt);
+            {
+                CallbackScope scope{state, 0, "update"};
+                update(dt);
+            }
             Leave(state);
         }
     }
@@ -905,6 +1332,18 @@ void OnUpdateReturn(ForgeCpu*, const u32 args[4], void*) {
 void SetReturnPc(ModHostCpu* cpu, u32 target) {
     cpu->r[15] = target & ~1u; // bx lr: bit 0 selects Thumb
     cpu->thumb = target & 1u;
+}
+
+void RunPosts(ForgeCpu* cpu, const std::vector<ForgeHook*>& posts, const u32* args) {
+    for (ForgeHook* h : posts) {
+        if (h->enabled.load(std::memory_order_relaxed) && Enter(h->owner)) {
+            {
+                CallbackScope scope{h->owner, h->target, "post"};
+                h->post(cpu, args, h->user);
+            }
+            Leave(h->owner);
+        }
+    }
 }
 
 // --- mod host callbacks -----------------------------------------------------------------------
@@ -927,6 +1366,8 @@ void OnGameStart() {
     HookCreate(g_main + kSystemDtor, OnSystemDtor, nullptr, nullptr);
     HookCreate(g_main + kAppRun, OnAppRun, nullptr, nullptr);
     HookCreate(g_main + kUpdate, nullptr, OnUpdateReturn, nullptr);
+    // before any plugin hook exists: trace hooks run first on their addresses
+    TraceStart();
     Log(FORGE_LOG_INFO, "Forge PC %d.%d.%d ready (main at %#x)", FORGE_PC_VERSION_MAJOR,
         FORGE_PC_VERSION_MINOR, FORGE_PC_VERSION_PATCH, g_main);
 }
@@ -950,18 +1391,21 @@ bool OnDispatch(uint32_t pc, ModHostCpu* mcpu, uint32_t thread_key) {
             frame = std::move(stack.back());
             stack.pop_back();
         }
-        for (ForgeHook* h : frame.posts) {
-            if (h->enabled.load(std::memory_order_relaxed) && Enter(h->owner)) {
-                h->post(cpu, frame.args.data(), h->user);
-                Leave(h->owner);
-            }
-        }
+        t_thread_key = thread_key;
+        RunPosts(cpu, frame.posts, frame.args.data());
         SetReturnPc(mcpu, frame.lr);
         return true;
     }
+    if (t_bypass > 0) {
+        return false; // inside call_original: the function runs as it is
+    }
+    t_thread_key = thread_key;
 
-    std::array<ForgeHook*, 16> hooks{};
+    std::array<ForgeHook*, 24> hooks{};
     size_t count = 0;
+    OverrideChain chain;
+    chain.target = pc;
+    chain.index = static_cast<size_t>(-1);
     {
         std::shared_lock lk{g_hooks_lock};
         const auto it = g_hooks.find(pc);
@@ -969,8 +1413,16 @@ bool OnDispatch(uint32_t pc, ModHostCpu* mcpu, uint32_t thread_key) {
             return false; // marked by the exe itself (its own hooks)
         }
         for (ForgeHook* h : it->second) {
+            if (h->override_fn) {
+                continue; // overrides are collected below, outermost (registered last) first
+            }
             if (count < hooks.size()) {
                 hooks[count++] = h;
+            }
+        }
+        for (auto o = it->second.rbegin(); o != it->second.rend(); ++o) {
+            if ((*o)->override_fn && chain.count < chain.list.size()) {
+                chain.list[chain.count++] = *o;
             }
         }
     }
@@ -980,12 +1432,42 @@ bool OnDispatch(uint32_t pc, ModHostCpu* mcpu, uint32_t thread_key) {
         if (!h->pre || !h->enabled.load(std::memory_order_relaxed) || !Enter(h->owner)) {
             continue;
         }
-        const ForgeHookAction action = h->pre(cpu, h->user);
+        ForgeHookAction action;
+        {
+            CallbackScope scope{h->owner, pc, "pre"};
+            action = h->pre(cpu, h->user);
+        }
         Leave(h->owner);
         if (action == FORGE_HOOK_RETURN) {
             SetReturnPc(mcpu, mcpu->r[14]); // skipped: straight back to the caller
             return true;
         }
+    }
+
+    if (chain.count) {
+        // the function is replaced: the override runs now (and calls the original if it wants
+        // to), the post hooks then run once, here, as they would when the function returns
+        chain.entry = *cpu;
+        std::array<u32, 6> entry_args{};
+        std::copy_n(mcpu->r, 4, entry_args.begin());
+        entry_args[4] = mcpu->r[14];
+        entry_args[5] = mcpu->r[13];
+        OverrideChain* const outer = t_chain;
+        t_chain = &chain;
+        const bool ran = RunOverrideFrom(chain, 0, cpu);
+        t_chain = outer;
+        if (ran) {
+            std::vector<ForgeHook*> posts;
+            for (size_t i = 0; i < count; ++i) {
+                if (hooks[i]->post) {
+                    posts.push_back(hooks[i]);
+                }
+            }
+            RunPosts(cpu, posts, entry_args.data());
+            SetReturnPc(mcpu, entry_args[4]);
+            return true;
+        }
+        // every override is off or being unloaded: the function runs normally below
     }
 
     Frame frame;
@@ -1028,9 +1510,12 @@ void OnShutdown() {
     }
     for (auto& p : plugins) {
         if (p.on_unload) {
+            CallbackScope scope{p.state, 0, "unload"};
             p.on_unload();
         }
     }
+    TraceShutdown();
+    CrashClean(); // reached the end without a crash: no marker for the next launch
     std::scoped_lock lk{g_log_lock};
     g_log_file.flush();
 }
@@ -1038,12 +1523,137 @@ void OnShutdown() {
 } // namespace
 
 std::string ConfigValue(const char* section, const char* key) {
+    std::scoped_lock lk{g_config_lock};
     const auto s = g_config.find(section);
     if (s == g_config.end()) {
         return {};
     }
     const auto k = s->second.find(key);
     return k == s->second.end() ? std::string{} : k->second;
+}
+
+bool ConfigSet(const char* section, const char* key, const char* value) {
+    {
+        std::scoped_lock lk{g_config_lock};
+        g_config[section][key] = value;
+    }
+    if (!WriteIniValue(PathU8(g_loader_dir + "/forge.ini"), section, key, value)) {
+        Log(FORGE_LOG_WARN, "forge.ini: could not save %s/%s", section, key);
+        return false;
+    }
+    return true;
+}
+
+IniMap ReadIni(const std::filesystem::path& path) {
+    return ParseIni(path);
+}
+
+bool IniSet(const std::filesystem::path& path, const char* section, const char* key,
+            const char* value) {
+    return WriteIniValue(path, section, key, value);
+}
+
+uint32_t MainBase() {
+    return g_main;
+}
+
+std::string FormatGuestAddr(uint32_t addr) {
+    char buf[48];
+    for (const auto& m : g_modules) {
+        if (addr >= m.base && addr - m.base < m.size) {
+            std::snprintf(buf, sizeof(buf), "%s+%#x", m.alias.empty() ? m.name.c_str()
+                                                                       : m.alias.c_str(),
+                          addr - m.base);
+            return buf;
+        }
+    }
+    std::snprintf(buf, sizeof(buf), "%#x", addr);
+    return buf;
+}
+
+ForgeHook* HookAdd(uint32_t target, ForgeHookPre pre, ForgeHookPost post, void* user,
+                   bool front) {
+    return AddHook(target, pre, post, nullptr, user, nullptr, front);
+}
+
+void HookRemove(ForgeHook* hook) {
+    if (!hook) {
+        return;
+    }
+    hook->enabled.store(false);
+    std::unique_lock lk{g_hooks_lock};
+    if (const auto it = g_hooks.find(hook->target); it != g_hooks.end()) {
+        std::erase(it->second, hook); // a dispatch that copied it already sees it disabled
+    }
+}
+
+bool IsCodeBlock(uint32_t guest_addr) {
+    return g_host && g_host->is_block(guest_addr);
+}
+
+uint32_t FrameCount() {
+    return g_frame_count.load(std::memory_order_relaxed);
+}
+
+uint32_t CurrentThreadKey() {
+    return t_thread_key;
+}
+
+std::vector<ModInfo> ListMods() {
+    std::vector<ModEntry> mods;
+    {
+        std::scoped_lock lk{g_mods_lock};
+        mods = g_mod_list;
+    }
+    std::vector<ModInfo> out;
+    for (const auto& m : mods) {
+        ModInfo info;
+        info.name = m.name;
+        info.plugins = m.files.size();
+        info.has_romfs = m.has_romfs;
+        info.note = m.note;
+        info.enabled = ModEnabled(m.name);
+        {
+            std::scoped_lock lk{g_plugins_lock};
+            for (const auto& p : g_plugins) {
+                info.loaded += p.mod == m.name;
+            }
+        }
+        // a switch is queued: it is applied between two game frames
+        {
+            std::scoped_lock lk{g_reload_lock};
+            for (const auto& [mod, on] : g_mod_requests) {
+                info.busy |= mod == m.name;
+            }
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+void SetModNote(const std::string& mod, const std::string& note) {
+    std::scoped_lock lk{g_mods_lock};
+    g_mod_notes[mod] = note;
+    for (auto& m : g_mod_list) {
+        if (m.name == mod) {
+            m.note = note;
+        }
+    }
+}
+
+void RequestResetScripts() {
+    g_reset_req = true;
+}
+
+std::string ResetScriptsMessage() {
+    std::scoped_lock lk{g_mods_lock};
+    return g_reset_msg;
+}
+
+void SetModEnabled(const std::string& name, bool enabled) {
+    ConfigSet("mods", name.c_str(), enabled ? "on" : "off");
+    std::scoped_lock lk{g_reload_lock};
+    g_mod_requests.emplace_back(name, enabled);
 }
 
 void Log(ForgeLogLevel level, const char* format, ...) {
@@ -1057,6 +1667,24 @@ void Log(ForgeLogLevel level, const char* format, ...) {
 
 const std::string& LoaderDir() {
     return g_loader_dir;
+}
+
+const std::string& ModsDirPath() {
+    return g_mods_dir;
+}
+
+void LogFault(const char* line) {
+    // from a fault handler: never wait for a lock the faulting thread may hold itself
+    if (g_host) {
+        const std::string text = std::string("[forge] [crash] ") + line;
+        g_host->log(MODHOST_LOG_ERROR, text.c_str());
+    }
+    if (g_log_lock.try_lock()) {
+        if (g_log_file.is_open()) {
+            g_log_file << "[error] [crash] " << line << std::endl;
+        }
+        g_log_lock.unlock();
+    }
 }
 
 void ForEachPluginUi(const std::function<void(size_t, const PluginUi&)>& fn) {
@@ -1112,6 +1740,8 @@ extern "C" MODHOST_EXPORT bool modhost_attach(const ModHostApi* api, ModHostCall
         std::scoped_lock lk{g_log_lock};
         g_log_file.open(PathU8(g_loader_dir + "/forge.log"), std::ios::trunc);
     }
+    CrashCheckLastSession(); // before any plugin loads: may switch the guilty mod off
+    CrashInit();
 
     cb->version = MODHOST_API_VERSION;
     cb->on_game_start = OnGameStart;
