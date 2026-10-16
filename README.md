@@ -215,3 +215,9 @@ Forge PC is MIT licensed (`LICENSE`). It builds on:
 
 Details: `THIRD_PARTY_NOTICES.md`. Release builds carry these files in `Forge/licenses/` (and
 `UIFix/LICENSE*.txt`).
+
+## AI disclosure
+
+Forge PC and UI Fix were written with the help of an AI coding assistant, directed, built and
+tested in game by the maintainer. What the AI did, what it did not, and how it is checked:
+[AI_DISCLOSURE.md](AI_DISCLOSURE.md) (also in the release zip as `Forge/licenses/`).

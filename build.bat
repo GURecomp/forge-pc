@@ -34,6 +34,7 @@ copy /y LICENSE-MHGU-Forge.txt "%OUT%\Forge\licenses\" >nul
 copy /y THIRD_PARTY_NOTICES.md "%OUT%\Forge\licenses\" >nul
 copy /y third_party\imgui\LICENSE.txt "%OUT%\Forge\licenses\LICENSE-imgui.txt" >nul
 copy /y data\LICENSE-Roboto.txt "%OUT%\Forge\licenses\" >nul
+copy /y AI_DISCLOSURE.md "%OUT%\Forge\licenses\" >nul
 
 rem example plugin: compiled to check it still builds, not installed
 cl /nologo /O2 /MT /W4 /LD /Iinclude examples\hello\hello.c /Fo%OBJ%\hello.obj /Fe:build\examples\hello.dll /link /IMPLIB:%OBJ%\hello.lib || exit /b 1

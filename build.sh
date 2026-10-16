@@ -58,7 +58,7 @@ build_objs "$OBJ/forge" "$FORGE_FLAGS" src/loader.cpp src/overlay.cpp src/trace.
 cp -f data/Roboto-Medium.ttf "$OUT/Forge/fonts/"
 [ -f "$OUT/Forge/forge.ini" ] || cp data/forge.ini "$OUT/Forge/"
 cp -f LICENSE "$OUT/Forge/licenses/LICENSE.txt"
-cp -f LICENSE-MHGU-Forge.txt THIRD_PARTY_NOTICES.md data/LICENSE-Roboto.txt "$OUT/Forge/licenses/"
+cp -f LICENSE-MHGU-Forge.txt THIRD_PARTY_NOTICES.md AI_DISCLOSURE.md data/LICENSE-Roboto.txt "$OUT/Forge/licenses/"
 cp -f third_party/imgui/LICENSE.txt "$OUT/Forge/licenses/LICENSE-imgui.txt"
 
 # example plugin: compiled to check it still builds, not installed
