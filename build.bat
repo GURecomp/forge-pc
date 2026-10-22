@@ -24,7 +24,8 @@ if not exist "%OBJ%\uifix" mkdir "%OBJ%\uifix"
 rem the build folder's path stays out of the binaries (assert strings)
 set "CFLAGS=/nologo /O2 /MT /EHsc /std:c++20 /W3 /utf-8 /DVK_NO_PROTOTYPES /DIMGUI_IMPL_VULKAN_NO_PROTOTYPES /DNOMINMAX /d1trimfile:"%CD%\\" /Iinclude /Ithird_party\imgui /I"%VULKAN_SDK%\Include""
 cl %CFLAGS% /c /Fo%OBJ%\ src\loader.cpp src\overlay.cpp src\trace.cpp src\crash.cpp src\config.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\imgui_demo.cpp third_party\imgui\backends\imgui_impl_vulkan.cpp || exit /b 1
-link /nologo /DLL /OUT:"%OUT%\Forge\forge.dll" /IMPLIB:%OBJ%\forge.lib %OBJ%\*.obj || exit /b 1
+rem link only the loader's own objects: plugin builds leave their .obj in %OBJ% too
+link /nologo /DLL /OUT:"%OUT%\Forge\forge.dll" /IMPLIB:%OBJ%\forge.lib %OBJ%\loader.obj %OBJ%\overlay.obj %OBJ%\trace.obj %OBJ%\crash.obj %OBJ%\config.obj %OBJ%\imgui.obj %OBJ%\imgui_draw.obj %OBJ%\imgui_tables.obj %OBJ%\imgui_widgets.obj %OBJ%\imgui_demo.obj %OBJ%\imgui_impl_vulkan.obj || exit /b 1
 copy /y data\Roboto-Medium.ttf "%OUT%\Forge\fonts\" >nul
 if not exist "%OUT%\Forge\forge.ini" copy /y data\forge.ini "%OUT%\Forge\" >nul
 rem licenses travel with the binaries (MIT / Apache 2.0 notices)

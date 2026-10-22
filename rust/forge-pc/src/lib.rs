@@ -237,6 +237,10 @@ pub enum Action {
     Continue,
     /// Skip the function and return to its caller now: set the return value first.
     Return,
+    /// Forge PC 0.7: continue at `cpu.raw().r[15]` with the registers as the hook left them.
+    /// Post hooks don't run; hooks on the target address do. Jumping to the hooked address
+    /// itself is treated as `Continue`. The plugin must ask for minor 7.
+    Jump,
 }
 
 /// What a post hook is told about the call it follows.
@@ -295,6 +299,7 @@ unsafe extern "C" fn pre_tramp<F: Fn(&mut Cpu) -> Action + Send + Sync + 'static
     let cpu = unsafe { &mut *(cpu as *mut Cpu) };
     match catch_unwind(AssertUnwindSafe(|| f(cpu))) {
         Ok(Action::Return) => sys::FORGE_HOOK_RETURN,
+        Ok(Action::Jump) => sys::FORGE_HOOK_JUMP,
         _ => sys::FORGE_HOOK_CONTINUE,
     }
 }
@@ -423,6 +428,15 @@ pub fn screen_size() -> Option<(u32, u32)> {
     }
     let (mut w, mut h) = (0u32, 0u32);
     unsafe { (api().screen_size)(&mut w, &mut h) }.then_some((w, h))
+}
+
+/// True if `addr` is the start of a recompiled block, i.e. a place a hook can be put (Forge PC
+/// 0.7). Logs nothing. `None` if the loader is older than 0.7.
+pub fn is_block(addr: u32) -> Option<bool> {
+    if !api_covers(sys::API_SIZE_0_7) {
+        return None;
+    }
+    Some(unsafe { (api().is_block)(addr) })
 }
 
 /// `<game>/mods/<title id>`.

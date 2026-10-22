@@ -5,7 +5,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 pub const FORGE_PC_VERSION_MAJOR: u16 = 0;
-pub const FORGE_PC_VERSION_MINOR: u16 = 5;
+pub const FORGE_PC_VERSION_MINOR: u16 = 7;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +71,8 @@ pub struct ForgePresent {
 
 pub const FORGE_HOOK_CONTINUE: c_int = 0;
 pub const FORGE_HOOK_RETURN: c_int = 1;
+/// 0.7: continue at `cpu.r[15]` with the registers as the hook left them.
+pub const FORGE_HOOK_JUMP: c_int = 2;
 
 pub type ForgeHookPre = unsafe extern "C" fn(cpu: *mut ForgeCpu, user: *mut c_void) -> c_int;
 pub type ForgeHookPost =
@@ -202,6 +204,8 @@ pub struct ForgeApi {
     ) -> bool,
     pub config_save: unsafe extern "C" fn(cfg: *mut ForgeConfig) -> bool,
     pub config_changed: unsafe extern "C" fn(cfg: *mut ForgeConfig) -> bool,
+    // --- 0.7 ---
+    pub is_block: unsafe extern "C" fn(addr: u32) -> bool,
 }
 
 // ForgeApi is a table of function pointers the loader keeps alive for the whole process.
@@ -213,6 +217,7 @@ pub const API_SIZE_0_2: usize = core::mem::offset_of!(ForgeApi, mem_free) + core
 pub const API_SIZE_0_3: usize = core::mem::offset_of!(ForgeApi, screen_size) + core::mem::size_of::<usize>();
 pub const API_SIZE_0_4: usize = core::mem::offset_of!(ForgeApi, hook_override) + core::mem::size_of::<usize>();
 pub const API_SIZE_0_5: usize = core::mem::offset_of!(ForgeApi, config_changed) + core::mem::size_of::<usize>();
+pub const API_SIZE_0_7: usize = core::mem::offset_of!(ForgeApi, is_block) + core::mem::size_of::<usize>();
 
 const _: () = assert!(core::mem::size_of::<ForgeCpu>() == 352);
 const _: () = assert!(core::mem::size_of::<ForgePluginInfo>() == 70);

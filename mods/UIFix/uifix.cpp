@@ -541,11 +541,14 @@ bool MigrateOld() {
     bool any = ReadIni(hf + "hudfix_layouts.ini", kReadLayouts);
     any |= ReadIni(hf + "hudfix.ini", kReadSettings); // placement
     any |= ReadIni(us + "uiscale.ini", kReadSettings | kReadElements);
+    bool empty;
     {
         std::scoped_lock lk2{g_layout_lock};
-        if (g_modes.empty()) {
-            ReadIni(PresetPath("uifix_layouts.ini"), kReadLayouts);
-        }
+        empty = g_modes.empty();
+    }
+    // ReadIni takes g_layout_lock itself; calling it under the lock deadlocked the first start.
+    if (empty) {
+        ReadIni(PresetPath("uifix_layouts.ini"), kReadLayouts);
     }
     return any;
 }

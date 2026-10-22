@@ -731,6 +731,10 @@ bool ConfigChangedApi(ForgeConfig* c) {
     return ConfigPoll(c);
 }
 
+bool IsBlockApi(uint32_t addr) {
+    return g_host && g_host->is_block(addr);
+}
+
 const ForgeApi kApi = {
     .version = {FORGE_PC_VERSION_MAJOR, FORGE_PC_VERSION_MINOR, FORGE_PC_VERSION_PATCH},
     .size = static_cast<uint32_t>(sizeof(ForgeApi)),
@@ -768,6 +772,7 @@ const ForgeApi kApi = {
     .config_set = ConfigSetApi,
     .config_save = ConfigSaveApi,
     .config_changed = ConfigChangedApi,
+    .is_block = IsBlockApi,
 };
 
 // --- plugins ----------------------------------------------------------------------------------
@@ -1440,6 +1445,15 @@ bool OnDispatch(uint32_t pc, ModHostCpu* mcpu, uint32_t thread_key) {
         Leave(h->owner);
         if (action == FORGE_HOOK_RETURN) {
             SetReturnPc(mcpu, mcpu->r[14]); // skipped: straight back to the caller
+            return true;
+        }
+        if (action == FORGE_HOOK_JUMP) {
+            if (mcpu->r[15] == pc) {
+                // the hook on this block would fire again at once: an endless loop
+                Log(FORGE_LOG_WARN, "hook at %#x: JUMP to its own address, treated as CONTINUE", pc);
+                continue;
+            }
+            SetReturnPc(mcpu, mcpu->r[15]); // continue where the callback pointed r15
             return true;
         }
     }

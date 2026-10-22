@@ -197,6 +197,27 @@ the report (switch it on again in the menu).
 - Linux plugins: build with `-shared -fPIC -fvisibility=hidden` and export only the `forge_*`
   entry points (see the version script in `build.sh`), so each plugin keeps its own Dear ImGui.
 
+## Continuing elsewhere, checking for blocks, calling any code (0.7)
+
+- **`FORGE_HOOK_JUMP`**: a pre hook sets `cpu->r[15]` to an address and returns it; the game
+  continues there with every register as the hook left it (`FORGE_HOOK_RETURN` goes to `lr`
+  instead). Post hooks of the jumped-over function don't run, hooks on the target do. Jumping to
+  the hooked address itself would loop forever, so Forge logs a warning and treats it as
+  `FORGE_HOOK_CONTINUE`. Rust: `Action::Jump`.
+- **`is_block(addr)`**: true if `addr` starts a recompiled block, i.e. a hook can be put there.
+  Logs nothing, unlike a failed `hook_create`. Rust: `forge_pc::is_block` (`None` on an older
+  loader).
+- **`call` into code that has no recompiled block** (Thumb, a module your plugin loaded, a
+  region the recompiler did not reach) runs on the emulator's JIT until the code is back on a
+  block or returns. This needs an exe built with that change; on an older exe such a call fails
+  as before. Check with `is_block` if you need to know which path a call takes.
+- A hook (or `hook_override`) with neither callback set fails with "no callback" before the
+  block check, so that message does not mean the address is bad.
+- Guest code a plugin loads itself is not reloaded when the plugin is hot reloaded: unload what
+  you loaded in `forge_onUnload` and load it again in `forge_onInit`.
+
+Ask for minor 7 (`required_ver.minor = 7`, Rust `min_minor = 7`) if you use any of this.
+
 ## Credits and licenses
 
 Forge PC is MIT licensed (`LICENSE`). It builds on:

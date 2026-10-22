@@ -63,7 +63,7 @@ extern "C" {
 #endif
 
 #define FORGE_PC_VERSION_MAJOR 0
-#define FORGE_PC_VERSION_MINOR 6
+#define FORGE_PC_VERSION_MINOR 7
 #define FORGE_PC_VERSION_PATCH 0
 
 #ifdef _WIN32
@@ -136,7 +136,10 @@ typedef struct ForgeCpu {
  *       Return FORGE_HOOK_CONTINUE to run the function, or FORGE_HOOK_RETURN to skip it and
  *       return to its caller at once (set the return value first: r0 (r1) for integers and
  *       pointers, vfp.s[0] / vfp.d[0] for float / double: the game uses the hard-float ABI,
- *       float arguments arrive in s0-s15 / d0-d7).
+ *       float arguments arrive in s0-s15 / d0-d7), or FORGE_HOOK_JUMP (0.7) to continue at
+ *       cpu->r[15] with every register as the callback left it (set r15 to the target; bit 0
+ *       selects Thumb; lr is not used). Post hooks don't run after a jump; hooks on the target
+ *       address do.
  * post: runs when the function returns (return value in r0/r1 or s0/d0); args[0..3] = r0-r3
  *       at entry. May change the return value. Since 0.2 (check forge_api->version) the array
  *       has two more entries: args[4] = the caller's return address (LR at entry) and
@@ -144,6 +147,7 @@ typedef struct ForgeCpu {
 typedef enum ForgeHookAction {
     FORGE_HOOK_CONTINUE = 0,
     FORGE_HOOK_RETURN = 1,
+    FORGE_HOOK_JUMP = 2, /* 0.7: continue at cpu->r[15], registers untouched */
 } ForgeHookAction;
 
 typedef ForgeHookAction (*ForgeHookPre)(ForgeCpu* cpu, void* user);
@@ -194,7 +198,9 @@ typedef struct ForgeApi {
 
     /* hooks: target = guest address of a function's first instruction ("main" base + offset).
      * Either callback may be NULL. Returns NULL if the address isn't the start of a
-     * recompiled block (hooks only work on function entries / branch targets). */
+     * recompiled block (hooks only work on function entries / branch targets). Needs at least
+     * one callback: both NULL fails with "no callback" before the block check (use is_block to
+     * probe an address). */
     ForgeHook* (*hook_create)(uint32_t target, ForgeHookPre pre, ForgeHookPost post, void* user);
     void (*hook_enable)(ForgeHook* hook, bool enabled);
 
@@ -202,7 +208,11 @@ typedef struct ForgeApi {
      * that never wait (no locks under contention, no file/IPC/sleep): a system call inside
      * makes the call fail (returns false, registers restored, memory changes stay).
      * Integer/pointer args go to r0-r3 then the stack, float args to s0-s15 (hard-float ABI;
-     * fargs may be NULL). out may be NULL. Calls made from inside a call don't fire hooks. */
+     * fargs may be NULL). out may be NULL. Calls made from inside a call don't fire hooks.
+     * 0.7: code without a recompiled block (a module the plugin loaded into mem_alloc memory,
+     * an untranslated instruction) runs on the JIT instead of failing the call (exe with mod
+     * host support for it; older exes fail such calls). Hot reload: guest code and patched
+     * words a plugin put in guest memory stay there, so such a plugin should not be reloaded. */
     bool (*call)(uint32_t function, const uint32_t* args, uint32_t count, const float* fargs,
                  uint32_t fcount, ForgeCallResult* out);
 
@@ -294,6 +304,12 @@ typedef struct ForgeApi {
     bool (*config_set)(ForgeConfig* cfg, const char* section, const char* key, const char* value);
     bool (*config_save)(ForgeConfig* cfg);
     bool (*config_changed)(ForgeConfig* cfg);
+
+    /* --- 0.7 --- (check forge_api->size before use) */
+
+    /* true when a recompiled block starts at `addr`, i.e. hook_create / hook_override accept
+     * it. No log output, unlike a failed hook_create. */
+    bool (*is_block)(uint32_t addr);
 } ForgeApi;
 
 extern const ForgeApi* forge_api;
